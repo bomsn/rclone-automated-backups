@@ -2,6 +2,145 @@
 
 # Backup creation: settings collection and backup-script generation
 
+# Detect cache / junk folders and files that are safe to exclude from a backup.
+# Echoes newline-separated relative paths that actually exist under <site_path>.
+# Pure ( no prompts ) so it can be reused by headless mode.
+# It NEVER returns wp-content/uploads or anything under it - the media must stay.
+detect_excludes() {
+    local site_path="${1%/}"
+    local -a found=()
+    local seen=" "
+    local candidate entry rel
+
+    # Fixed directory / file candidates ( caches, dependency dirs, known logs )
+    local -a fixed=(
+        "wp-content/cache"
+        "wp-content/debug.log"
+        "node_modules"
+        "wp-content/node_modules"
+        "wp-content/ai1wm-backups"
+        "wp-content/updraft"
+        "wp-content/updraftplus"
+        "wp-content/backups"
+        ".git"
+    )
+    for candidate in "${fixed[@]}"; do
+        if [ -e "$site_path/$candidate" ] && [[ "$seen" != *" $candidate "* ]]; then
+            found+=("$candidate")
+            seen+="$candidate "
+        fi
+    done
+
+    # backup* directories directly under wp-content/ ( eg; backup, backups-old )
+    if [ -d "$site_path/wp-content" ]; then
+        for entry in "$site_path"/wp-content/backup*/; do
+            [ -d "$entry" ] || continue
+            rel="wp-content/$(basename "$entry")"
+            if [[ "$seen" != *" $rel "* ]]; then
+                found+=("$rel")
+                seen+="$rel "
+            fi
+        done
+    fi
+
+    # *.log files at the site root and directly under wp-content/
+    for entry in "$site_path"/*.log "$site_path"/wp-content/*.log; do
+        [ -f "$entry" ] || continue
+        rel="${entry#"$site_path"/}"
+        if [[ "$seen" != *" $rel "* ]]; then
+            found+=("$rel")
+            seen+="$rel "
+        fi
+    done
+
+    [ ${#found[@]} -gt 0 ] && printf '%s\n' "${found[@]}"
+}
+
+# Interactive exclude selection. Shows the auto-detected junk locations ( all
+# pre-marked for exclusion ), lets the user KEEP any of them, then asks for extra
+# free-text paths. The result is written to EXCLUDED_ITEMS as the comma-separated
+# string the rest of the code already consumes.
+review_detected_excludes() {
+    local site_path="$1"
+    local -a detected=()
+    local line i
+
+    if [ -n "$site_path" ]; then
+        while IFS= read -r line; do
+            [ -n "$line" ] && detected+=("$line")
+        done < <(detect_excludes "$site_path")
+    fi
+
+    local -a to_exclude=()
+
+    if [ ${#detected[@]} -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}Auto-detected cache / junk locations under this site:${RESET}"
+        for ((i = 0; i < ${#detected[@]}; i++)); do
+            echo -e "  ${BOLD}$((i + 1)).${RESET} ${detected[i]}"
+        done
+        echo ""
+        echo -e "All of the above will be ${BOLD}excluded${RESET} from the backup."
+        read -p "$(echo -e "${BOLD}${BLUE}Enter number(s) to KEEP ( eg; 1,3 ), or press Enter to exclude them all: ${RESET}")" keep_input
+
+        # Strip terminal bracketed-paste markers some terminals add around pasted text
+        keep_input="${keep_input//$'\e'/}"
+        keep_input="${keep_input//'[200~'/}"
+        keep_input="${keep_input//'[201~'/}"
+        keep_input="${keep_input#"${keep_input%%[![:space:]]*}"}"
+        keep_input="${keep_input%"${keep_input##*[![:space:]]}"}"
+
+        local -a keep_idx=()
+        local keep_str
+        if [ -n "$keep_input" ]; then
+            if keep_str=$(parse_index_selection "$keep_input" "${#detected[@]}"); then
+                read -ra keep_idx <<<"$keep_str"
+            else
+                echo -e "${YELLOW}Selection not understood - excluding all detected locations.${RESET}"
+            fi
+        fi
+
+        # Exclude every detected location that was not chosen to be kept
+        local kept seen_keep=" "
+        for kept in "${keep_idx[@]}"; do
+            seen_keep+="$kept "
+        done
+        for ((i = 0; i < ${#detected[@]}; i++)); do
+            if [[ "$seen_keep" != *" $((i + 1)) "* ]]; then
+                to_exclude+=("${detected[i]}")
+            fi
+        done
+    fi
+
+    # Always offer a free-text prompt for any extra paths to exclude
+    local extra
+    if [ ${#detected[@]} -gt 0 ]; then
+        read -p "$(echo -e "${BOLD}${BLUE}Enter any additional folders to exclude (comma-separated eg; wp-admin, wp-includes; or leave empty for none): ${RESET}")" extra
+    else
+        read -p "$(echo -e "${BOLD}${BLUE}Enter folders to exclude (comma-separated eg; wp-admin, wp-includes; or leave empty for none): ${RESET}")" extra
+    fi
+    if [ -n "$extra" ]; then
+        local -a extra_arr=()
+        IFS=',' read -ra extra_arr <<<"$extra"
+        for line in "${extra_arr[@]}"; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [ -n "$line" ] && to_exclude+=("$line")
+        done
+    fi
+
+    # Join into the comma-separated string the rest of the code consumes
+    local result=""
+    for line in "${to_exclude[@]}"; do
+        if [ -z "$result" ]; then
+            result="$line"
+        else
+            result="$result, $line"
+        fi
+    done
+    EXCLUDED_ITEMS="$result"
+}
+
 # Function to collect the backup settings from the user
 collect_backup_settings() {
 
@@ -79,8 +218,8 @@ collect_backup_settings() {
     done
     PS3="$original_ps3" # Restore the original PS3 value
 
-    # Collect excluded folders
-    read -p "$(echo -e "${BOLD}${BLUE}Enter folders to exclude (comma-separated eg; wp-admin, wp-includes; or leave empty for none): ${RESET}")" EXCLUDED_ITEMS
+    # Collect excluded folders ( auto-detect cache / junk, then free-text extras )
+    review_detected_excludes "$(resolve_domain_path "$BACKUP_DOMAIN")"
 
     # Collect backup type
     # full      = whole site files + database in one archive
@@ -221,14 +360,8 @@ generate_backup_script() {
         echo -e "${RED}A valid domain must be selected from the available options.${RESET}"
         return
     else
-        # If the domain is valid, let populate the backup path
-        for ((i = 0; i < ${#DOMAINS[@]}; i++)); do
-            current_domain="${DOMAINS[$i]}"
-            current_path="${PATHS[$i]}"
-            if [ "$current_domain" == "$backup_domain" ]; then
-                backup_path=$current_path
-            fi
-        done
+        # If the domain is valid, populate the backup path
+        backup_path=$(resolve_domain_path "$backup_domain")
     fi
 
     # Validate and sanitize backup_frequency

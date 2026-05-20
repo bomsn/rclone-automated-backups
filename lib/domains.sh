@@ -19,6 +19,21 @@ derive_wp_path() {
     fi
 }
 
+# Look up the stored WordPress path for a domain. Echoes the path, or an empty
+# string when the domain is not in the DOMAINS array.
+resolve_domain_path() {
+    local target="$1"
+    local i
+    for ((i = 0; i < ${#DOMAINS[@]}; i++)); do
+        if [ "${DOMAINS[$i]}" == "$target" ]; then
+            echo "${PATHS[$i]}"
+            return 0
+        fi
+    done
+    echo ""
+    return 1
+}
+
 # Dispatcher: let the user pick how to add a site ( auto-discovery or manual entry )
 add_domain() {
 
@@ -262,38 +277,10 @@ multiselect_discovered() {
 
         # Parse the input into a list of 1-based indexes
         local -a chosen=()
-        local valid=true
-        if [ "$sel_input" == "all" ] || [ "$sel_input" == "a" ]; then
-            for ((i = 1; i <= count; i++)); do chosen+=("$i"); done
-        elif [ -z "$sel_input" ]; then
-            valid=false
+        local chosen_str
+        if chosen_str=$(parse_index_selection "$sel_input" "$count"); then
+            read -ra chosen <<<"$chosen_str"
         else
-            local -a parts=()
-            local p lo hi n
-            IFS=', ' read -ra parts <<<"$sel_input"
-            for p in "${parts[@]}"; do
-                [ -z "$p" ] && continue
-                if [[ "$p" =~ ^[0-9]+$ ]]; then
-                    if [ "$p" -ge 1 ] && [ "$p" -le "$count" ]; then
-                        chosen+=("$p")
-                    else
-                        valid=false
-                    fi
-                elif [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-                    lo="${BASH_REMATCH[1]}"
-                    hi="${BASH_REMATCH[2]}"
-                    if [ "$lo" -ge 1 ] && [ "$hi" -le "$count" ] && [ "$lo" -le "$hi" ]; then
-                        for ((n = lo; n <= hi; n++)); do chosen+=("$n"); done
-                    else
-                        valid=false
-                    fi
-                else
-                    valid=false
-                fi
-            done
-        fi
-
-        if [ "$valid" != true ] || [ "${#chosen[@]}" -eq 0 ]; then
             msg="${RED}Invalid selection.${RESET} Use numbers 1-${count} ( eg; 1,3,6 ), a range ( eg; 1-10 ), or 'all'."
             continue
         fi

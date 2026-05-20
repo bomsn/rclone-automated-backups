@@ -53,3 +53,47 @@ restore_cursor_position() {
     fi
 
 }
+
+# Parse a user index selection ( "1,3,6", a range "1-10,15", or "all"/"a" ) against
+# a maximum count. On success echoes the space-separated 1-based indexes and returns
+# 0; on any invalid or empty input echoes nothing and returns 1.
+parse_index_selection() {
+    local input="$1"
+    local count="$2"
+    local -a chosen=()
+    local i
+
+    if [ "$input" == "all" ] || [ "$input" == "a" ]; then
+        for ((i = 1; i <= count; i++)); do chosen+=("$i"); done
+    elif [ -z "$input" ]; then
+        return 1
+    else
+        local -a parts=()
+        local p lo hi n
+        IFS=', ' read -ra parts <<<"$input"
+        for p in "${parts[@]}"; do
+            [ -z "$p" ] && continue
+            if [[ "$p" =~ ^[0-9]+$ ]]; then
+                if [ "$p" -ge 1 ] && [ "$p" -le "$count" ]; then
+                    chosen+=("$p")
+                else
+                    return 1
+                fi
+            elif [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                lo="${BASH_REMATCH[1]}"
+                hi="${BASH_REMATCH[2]}"
+                if [ "$lo" -ge 1 ] && [ "$hi" -le "$count" ] && [ "$lo" -le "$hi" ]; then
+                    for ((n = lo; n <= hi; n++)); do chosen+=("$n"); done
+                else
+                    return 1
+                fi
+            else
+                return 1
+            fi
+        done
+    fi
+
+    [ "${#chosen[@]}" -eq 0 ] && return 1
+    echo "${chosen[@]}"
+    return 0
+}
