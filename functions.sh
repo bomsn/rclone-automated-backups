@@ -361,6 +361,12 @@ multiselect_discovered() {
             return
         fi
 
+        # Strip terminal bracketed-paste markers ( ESC[200~ ... ESC[201~ ) that
+        # some terminals wrap around pasted text, so pasted input parses cleanly
+        ms_choice="${ms_choice//$'\e'/}"
+        ms_choice="${ms_choice//'[200~'/}"
+        ms_choice="${ms_choice//'[201~'/}"
+
         case "$ms_choice" in
         q)
             clear_screen "force"
@@ -378,24 +384,32 @@ multiselect_discovered() {
             break
             ;;
         *)
-            # Toggle every valid, comma-separated index
-            IFS=',' read -ra ms_tokens <<<"$ms_choice"
+            # Parse the comma-separated list of indexes. Validate every entry
+            # first, then apply the toggles — so one bad entry changes nothing.
             local valid_input=true
+            local -a ms_tokens=()
+            local -a toggle_list=()
             local token idx
+            IFS=',' read -ra ms_tokens <<<"$ms_choice"
             for token in "${ms_tokens[@]}"; do
-                token="${token//[[:space:]]/}"
+                token="${token//[[:space:]]/}" # tolerate stray spaces, tabs, CR
+                [ -z "$token" ] && continue    # skip empty fields (eg; trailing comma)
                 if [[ "$token" =~ ^[0-9]+$ ]] && [ "$token" -ge 1 ] && [ "$token" -le "$count" ]; then
+                    toggle_list+=("$token")
+                else
+                    valid_input=false
+                fi
+            done
+            if [ "$valid_input" == true ] && [ "${#toggle_list[@]}" -gt 0 ]; then
+                for token in "${toggle_list[@]}"; do
                     idx=$((token - 1))
                     if [ "${selected[idx]}" == "1" ]; then
                         selected[idx]=0
                     else
                         selected[idx]=1
                     fi
-                else
-                    valid_input=false
-                fi
-            done
-            if [ "$valid_input" == false ]; then
+                done
+            else
                 echo -e "${RED}Invalid input, please try again.${RESET}"
                 read -p "$(echo -e "${BLUE}Press Enter to continue ...${RESET}")" _
             fi

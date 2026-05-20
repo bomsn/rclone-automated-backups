@@ -33,6 +33,10 @@ RESET="\e[0m" # Reset text formatting
 # Load the functions file
 source functions.sh
 
+# Disable terminal bracketed-paste mode so pasted input ( file paths, lists of
+# numbers, etc. ) is read cleanly, without the wrapping markers some terminals add
+printf '\e[?2004l'
+
 # Clear screen
 clear_screen
 
