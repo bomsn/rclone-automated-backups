@@ -422,7 +422,7 @@ create_backup_from_settings() {
 
     # Validate backup_domain
     if [[ ! " ${DOMAINS[@]} " =~ " $backup_domain " ]]; then
-        clear_screen "force"
+        [ "$mode" == "interactive" ] && clear_screen "force"
         echo -e "${RED}A valid domain must be selected from the available options.${RESET}" >&2
         return 1
     else
@@ -432,14 +432,14 @@ create_backup_from_settings() {
 
     # Validate and sanitize backup_frequency
     if [ -z "$backup_frequency" ] || [[ ! "$backup_frequency" =~ ^(daily|weekly|monthly)$ ]]; then
-        clear_screen "force"
+        [ "$mode" == "interactive" ] && clear_screen "force"
         echo -e "${RED}A valid frequency must be selected from the available options.${RESET}" >&2
         return 1
     fi
 
     # Validate backup_time
     if [ -z "$backup_time" ] || [[ ! "$backup_time" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
-        clear_screen "force"
+        [ "$mode" == "interactive" ] && clear_screen "force"
         echo -e "${RED}A valid backup time must selected from the available options.${RESET}" >&2
         return 1
     else
@@ -449,7 +449,7 @@ create_backup_from_settings() {
 
     # Validate retention_period
     if [ -z "$retention_period" ] || [[ ! "$retention_period" =~ ^(3|7|30|90|180)$ ]]; then
-        clear_screen "force"
+        [ "$mode" == "interactive" ] && clear_screen "force"
         echo -e "${RED}A valid retention period must selected from the available options.${RESET}" >&2
         return 1
     fi
@@ -475,7 +475,7 @@ create_backup_from_settings() {
         Saturday) cron_dow=6 ;;
         Sunday) cron_dow=0 ;;
         *)
-            clear_screen "force"
+            [ "$mode" == "interactive" ] && clear_screen "force"
             echo -e "${RED}A valid weekday must be selected for a weekly backup.${RESET}" >&2
             return 1
             ;;
@@ -496,7 +496,7 @@ create_backup_from_settings() {
             schedule="monthly"
             schedule_label="Monthly (day $backup_day)"
         else
-            clear_screen "force"
+            [ "$mode" == "interactive" ] && clear_screen "force"
             echo -e "${RED}A valid day of month ( 1-28 or last ) must be selected for a monthly backup.${RESET}" >&2
             return 1
         fi
@@ -642,14 +642,14 @@ create_backup_from_settings() {
                 # Check the exit status of the previous command
                 if [ $? -ne 0 ]; then
                     # The restic init command failed, we'll bail out to avoid creating a non-valid backup script
-                    clear_screen "force"
+                    [ "$mode" == "interactive" ] && clear_screen "force"
                     echo -e "${RED}Restic repository initilization failed.${RESET}" >&2
                     echo ""
                     return 1
                 fi
             else
                 # If a repository does not exist, restic will return a non-zero exit code
-                clear_screen "force"
+                [ "$mode" == "interactive" ] && clear_screen "force"
                 echo -e "${RED}This incremental backup could not be created. Duplicate found, or other error.${RESET}" >&2
                 echo ""
                 return 1
@@ -949,17 +949,17 @@ fi
 if [ "\$backup_success" = false ]; then
     # Create temporary directory for cp method
     tmp_backup_dir="\${wp_owner_directory}/tmp_backup_\${backup_date}"
-
+    
     # Check available space before copying
     required_space=\$(sudo du -sb "\${domain_path}" | cut -f1)
     available_space=\$(sudo df -B1 "\${wp_owner_directory}" | awk 'NR==2 {print \$4}')
 
     if [ "\$available_space" -gt "\$((required_space * 2))" ]; then
         echo "[\${timestamp}] - Sufficient space available for cp method" >> "$LOG_FILE"
-
+        
         # Create temp directory and copy files
         sudo mkdir -p "\${tmp_backup_dir}"
-
+        
         if sudo test "\${call_type}" = "restore"; then
             sudo cp -a "\${domain_path}/." "\${tmp_backup_dir}/"
         else
@@ -970,13 +970,13 @@ if [ "\$backup_success" = false ]; then
                 sudo rm -rf "\${tmp_backup_dir}/\${exclude_path}"
             done
         fi
-
+        
         # Try tar on the copied files
         if sudo tar -czf "\${backup_filename}.tmp" -C "\${tmp_backup_dir}" . -C "\${wp_owner_directory}/" "\${db_filename}" 2>> "$LOG_FILE"; then
             backup_success=true
             echo "[\${timestamp}] - Backup successful using cp method" >> "$LOG_FILE"
         fi
-
+        
         # Clean up temp directory
         sudo rm -rf "\${tmp_backup_dir}"
     else
