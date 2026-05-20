@@ -89,6 +89,9 @@ run_headless() {
     [ -n "$BACKUP_REMOTE" ] || { headless_usage "--remote is required"; return 2; }
     [ -n "$REMOTE_BACKUP_LOCATION" ] || { headless_usage "--location is required"; return 2; }
 
+    # Drop a single trailing slash from the location, matching the interactive prompt
+    REMOTE_BACKUP_LOCATION="${REMOTE_BACKUP_LOCATION%/}"
+
     # --- value validation ( same rules as the interactive prompts ) ---
     case "$BACKUP_TYPE" in
     full | incremental | database) ;;
