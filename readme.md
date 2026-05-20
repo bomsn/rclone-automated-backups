@@ -1,11 +1,11 @@
 ## Rclone Automated Backups for WordPress
 
-Automate WordPress backups to various cloud storage providers using rclone automation. Also supports `restic` for incremental backups using rclone.
+Automate WordPress backups to various cloud storage providers using rclone automation. Create full-site, database-only, or `restic`-based incremental backups on a daily, weekly, or monthly schedule.
 
 ![Screenshot](/screenshot.png)
 
 ## Requirements
-- Sudo and SSH access to your server.
+- SSH and root access to your server. The script manages system cron, so it must be run as root (via `sudo`).
 - [wp-cli](https://wp-cli.org/) installed.
 - [rclone](https://rclone.org/) installed.
 
@@ -33,7 +33,7 @@ sudo bash config.sh
 
 You'll have options to add domains and configure backups. 
 
-The script will guide you through the process, just make sure to add sites/domains and their correct path, add backup configurations such as backup time, frequency, retention period, and configure rclone remote(s), then create your backups.
+The script will guide you through the process. When adding a site, you can let the script auto-discover WordPress installs on the server and pick from a list, or enter the path manually. Then configure your rclone remote(s) and create backups, choosing a type (full site, database-only, or incremental), a schedule (daily, weekly, or monthly), a backup time and a retention period.
 
 **Note:** the domains and associated paths will be saved to `definitions` file, you can change it later if needed. However, note that changing the file doesn't change any running backups.
 
