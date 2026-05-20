@@ -11,6 +11,7 @@ Automate WordPress backups to various cloud storage providers using rclone autom
 
 ## Optional
 - [restic](https://restic.readthedocs.io/en/stable/020_installation.html) to add incremental backup support ( no setup or configuration needed ).
+- A working mail sender (`mail` / `mailutils` or `sendmail`) if you want an email alert when a backup fails.
 
 ## Getting Started
 
@@ -41,4 +42,4 @@ That's it, once you've completed all the configuration steps, a cron job will be
 
 ### Subsequent Use:
 
-If you want to add more websites, create additional backups, disable or delete existing backups, or even restore the remote backups created by the script, just run the config script again `sudo bash config.sh` and use the available options.
+If you want to add more websites, create additional backups, disable or delete existing backups, restore the remote backups created by the script, or set an email address for backup-failure alerts (under **Manage backups → Configure email notifications**), just run the config script again `sudo bash config.sh` and use the available options.

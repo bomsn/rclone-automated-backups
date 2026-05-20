@@ -81,9 +81,11 @@ EOL
         echo "PATHS=(${new_paths[@]})" >>"$DEFINITIONS_FILE"
     fi
 
-    # Backup configuration options
+    # Notification settings
     cat <<EOL >>"$DEFINITIONS_FILE"
 
+# Email address for backup failure alerts ( empty = notifications disabled )
+NOTIFY_EMAIL="${NOTIFY_EMAIL}"
 EOL
 
     # Update definitions state variables
@@ -1025,6 +1027,30 @@ rclone_remote="${rclone_remote_name}"
 remote_backup_location="${remote_backup_location}"
 timestamp=\$(date +'%Y-%m-%d %H:%M:%S')
 backup_date=\$(date +'%d-%m-%Y_%H-%M')
+
+# Email a failure alert if this backup exits with an error ( one alert per failed run ).
+# The address is read from the definitions file at run time, so it can be changed centrally.
+definitions_file="$PWD/$DEFINITIONS_FILE"
+backup_failure_notify() {
+    local rc=\$?
+    set +e
+    [ \$rc -eq 0 ] && return
+    local notify_email=""
+    [ -f "\${definitions_file}" ] && notify_email=\$(grep -oP 'NOTIFY_EMAIL="\K[^"]*' "\${definitions_file}" 2>/dev/null)
+    [ -z "\${notify_email}" ] && return
+    local subject="[Backup FAILED] \${domain} (\${type})"
+    local mail_body="Automated \${type} backup for '\${domain}' failed with exit code \${rc}.
+Server time: \$(date)
+
+--- last 30 log lines ---
+\$(tail -n 30 "$LOG_FILE" 2>/dev/null)"
+    if command -v mail >/dev/null 2>&1; then
+        printf '%s\n' "\${mail_body}" | mail -s "\${subject}" "\${notify_email}"
+    elif command -v sendmail >/dev/null 2>&1; then
+        printf 'Subject: %s\nTo: %s\n\n%s\n' "\${subject}" "\${notify_email}" "\${mail_body}" | sendmail -t
+    fi
+}
+trap backup_failure_notify EXIT
 
 echo "[\${timestamp}] BACK UP STARTED (\${type}): Performing $backup_time $backup_frequency backup for '\${domain}'" >> "$LOG_FILE"
 echo "[\${timestamp}] - Exporting database" >> "$LOG_FILE"
@@ -1987,6 +2013,68 @@ manage_automated_backups() {
     PS3="$original_ps3"
 }
 
+# Configure the single email address that receives backup failure alerts.
+# The address is stored in the definitions file and read by every backup
+# script at run time, so setting it once covers all backups.
+configure_notifications() {
+
+    clear_screen
+    echo -e "${BOLD}${UNDERLINE}Configure email notifications${RESET}"
+    echo ""
+
+    # Show the current state
+    if [ -n "$NOTIFY_EMAIL" ]; then
+        echo -e "${BOLD}Current address:${RESET} $NOTIFY_EMAIL"
+    else
+        echo -e "${YELLOW}Email notifications are currently disabled.${RESET}"
+    fi
+    echo ""
+
+    # Warn if the server has no way to send mail
+    if ! command -v mail &>/dev/null && ! command -v sendmail &>/dev/null; then
+        echo -e "${YELLOW}Warning: neither 'mail' nor 'sendmail' was found on this server.${RESET}"
+        echo -e "${YELLOW}Install a mail client (eg; ${BOLD}apt-get install mailutils${RESET}${YELLOW}) or configure an MTA,${RESET}"
+        echo -e "${YELLOW}otherwise failure alerts cannot be delivered.${RESET}"
+        echo ""
+    fi
+
+    echo -e "An email is sent only when a backup ${BOLD}fails${RESET} ( one alert per failed run )."
+    echo -e "Enter an email address, type ${BOLD}disable${RESET} to turn alerts off, or ${BOLD}q${RESET} to go back."
+    read -p "$(echo -e "${BOLD}${BLUE}Email address: ${RESET}")" input
+
+    # Go back without changes
+    if [ "$input" == "q" ]; then
+        clear_screen "force"
+        return
+    fi
+
+    # Disable notifications
+    if [ "$input" == "disable" ]; then
+        NOTIFY_EMAIL=""
+        update_definitions
+        clear_screen "force"
+        echo -e "${GREEN}Email notifications have been disabled.${RESET}"
+        echo ""
+        return
+    fi
+
+    # Validate the email address
+    local email_pattern="^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+    if [[ ! "$input" =~ $email_pattern ]]; then
+        clear_screen "force"
+        echo -e "${RED}'$input' is not a valid email address.${RESET}"
+        echo ""
+        return
+    fi
+
+    # Save it ( applies to all existing and future backups on their next run )
+    NOTIFY_EMAIL="$input"
+    update_definitions
+    clear_screen "force"
+    echo -e "${GREEN}Backup failure alerts will be sent to:${RESET} ${BOLD}$NOTIFY_EMAIL${RESET}"
+    echo ""
+}
+
 # Function to manage automated backups
 manage_backups() {
     while true; do
@@ -2002,7 +2090,8 @@ manage_backups() {
         echo -e "${BOLD}${UNDERLINE}Manage backups${RESET}"
         echo "1. Manage automated backups"
         echo "2. Create a new automated backup"
-        echo "3. Return to the previous menu"
+        echo "3. Configure email notifications"
+        echo "4. Return to the previous menu"
         read -p "$(echo -e "${BOLD}${BLUE}Enter your choice: ${RESET}")" choice
 
         case "$choice" in
@@ -2013,6 +2102,9 @@ manage_backups() {
             generate_backup_script
             ;;
         3)
+            configure_notifications
+            ;;
+        4)
             clear_screen "force"
             return
             ;;
