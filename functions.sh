@@ -327,156 +327,141 @@ add_domain_discover() {
 }
 
 # Let the user pick which discovered sites ( DISCOVERED_DOMAINS / DISCOVERED_PATHS )
-# to add. The list is printed once and refreshed only on request, so a long list
-# doesn't redraw and scroll away on every keystroke.
+# to add. One prompt takes the numbers to add ( supports ranges and 'all' ), then
+# a confirmation screen lists exactly what will be saved.
 multiselect_discovered() {
 
     local count=${#DISCOVERED_DOMAINS[@]}
-    # Selection state: 1 = selected, 0 = not. Everything is pre-selected.
-    local selected=()
     local i
-    for ((i = 0; i < count; i++)); do
-        selected[i]=1
-    done
-
-    local sel_count
-    local show_list=true # print the full list on the first pass
+    local msg="" # an error message carried over to the next redraw
 
     while true; do
-        if [ "$show_list" == true ]; then
-            clear_screen "force"
-            echo -e "${BOLD}${UNDERLINE}Add a site/domain > Auto-discover${RESET}"
-            echo ""
-            echo -e "${GREEN}Discovered ${count} WordPress site(s).${RESET} All are selected by default."
-            echo ""
-            for ((i = 0; i < count; i++)); do
-                local mark="[ ]"
-                if [ "${selected[i]}" == "1" ]; then
-                    mark="${GREEN}[x]${RESET}"
-                fi
-                echo -e "  $mark $((i + 1)). ${BOLD}${DISCOVERED_DOMAINS[i]}${RESET}  ${BLUE}${DISCOVERED_PATHS[i]}${RESET}"
-            done
-            show_list=false
-        fi
-
-        # Count how many entries are currently selected
-        sel_count=0
+        # Show the numbered list of discovered sites
+        clear_screen "force"
+        echo -e "${BOLD}${UNDERLINE}Add a site/domain > Auto-discover${RESET}"
+        echo ""
+        echo -e "${GREEN}Discovered ${count} WordPress site(s):${RESET}"
+        echo ""
         for ((i = 0; i < count; i++)); do
-            [ "${selected[i]}" == "1" ] && sel_count=$((sel_count + 1))
+            echo -e "  ${BOLD}$((i + 1)).${RESET} ${BOLD}${DISCOVERED_DOMAINS[i]}${RESET}  ${BLUE}${DISCOVERED_PATHS[i]}${RESET}"
         done
         echo ""
-        echo -e "${YELLOW}Toggle a number or list (eg; 1,3,4)  ·  'a' all  ·  'n' none  ·  'l' show list  ·  'd' done  ·  'q' cancel${RESET}"
-        # A failed read ( eg; end-of-input ) is treated as a cancel to avoid looping forever
-        if ! read -p "$(echo -e "${BOLD}${BLUE}[${sel_count}/${count} selected] Your choice: ${RESET}")" ms_choice; then
+        if [ -n "$msg" ]; then
+            echo -e "$msg"
+            echo ""
+            msg=""
+        fi
+
+        # Single prompt: the numbers of the sites to add
+        echo -e "${YELLOW}Type the number(s) of the sites to add — eg; ${BOLD}1,3,6${RESET}${YELLOW}  ·  a range ${BOLD}1-10,15${RESET}${YELLOW}  ·  or ${BOLD}all${RESET}${YELLOW}.${RESET}"
+        if ! read -p "$(echo -e "${BOLD}${BLUE}Sites to add ( or q to cancel ): ${RESET}")" sel_input; then
             clear_screen "force"
-            echo -e "${YELLOW}Discovery cancelled, nothing was added.${RESET}"
+            echo -e "${YELLOW}Cancelled, nothing was added.${RESET}"
             echo ""
             return
         fi
 
-        # Strip terminal bracketed-paste markers ( ESC[200~ ... ESC[201~ ) that
-        # some terminals wrap around pasted text, so pasted input parses cleanly
-        ms_choice="${ms_choice//$'\e'/}"
-        ms_choice="${ms_choice//'[200~'/}"
-        ms_choice="${ms_choice//'[201~'/}"
+        # Strip terminal bracketed-paste markers some terminals add around pasted text
+        sel_input="${sel_input//$'\e'/}"
+        sel_input="${sel_input//'[200~'/}"
+        sel_input="${sel_input//'[201~'/}"
+        # Trim surrounding whitespace
+        sel_input="${sel_input#"${sel_input%%[![:space:]]*}"}"
+        sel_input="${sel_input%"${sel_input##*[![:space:]]}"}"
 
-        case "$ms_choice" in
-        q)
+        if [ "$sel_input" == "q" ]; then
             clear_screen "force"
-            echo -e "${YELLOW}Discovery cancelled, nothing was added.${RESET}"
+            echo -e "${YELLOW}Cancelled, nothing was added.${RESET}"
+            echo ""
+            return
+        fi
+
+        # Parse the input into a list of 1-based indexes
+        local -a chosen=()
+        local valid=true
+        if [ "$sel_input" == "all" ] || [ "$sel_input" == "a" ]; then
+            for ((i = 1; i <= count; i++)); do chosen+=("$i"); done
+        elif [ -z "$sel_input" ]; then
+            valid=false
+        else
+            local -a parts=()
+            local p lo hi n
+            IFS=', ' read -ra parts <<<"$sel_input"
+            for p in "${parts[@]}"; do
+                [ -z "$p" ] && continue
+                if [[ "$p" =~ ^[0-9]+$ ]]; then
+                    if [ "$p" -ge 1 ] && [ "$p" -le "$count" ]; then
+                        chosen+=("$p")
+                    else
+                        valid=false
+                    fi
+                elif [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                    lo="${BASH_REMATCH[1]}"
+                    hi="${BASH_REMATCH[2]}"
+                    if [ "$lo" -ge 1 ] && [ "$hi" -le "$count" ] && [ "$lo" -le "$hi" ]; then
+                        for ((n = lo; n <= hi; n++)); do chosen+=("$n"); done
+                    else
+                        valid=false
+                    fi
+                else
+                    valid=false
+                fi
+            done
+        fi
+
+        if [ "$valid" != true ] || [ "${#chosen[@]}" -eq 0 ]; then
+            msg="${RED}Invalid selection.${RESET} Use numbers 1-${count} ( eg; 1,3,6 ), a range ( eg; 1-10 ), or 'all'."
+            continue
+        fi
+
+        # De-duplicate the chosen indexes and build the add lists
+        local -a to_add_domains=()
+        local -a to_add_paths=()
+        local seen=" "
+        local c
+        for c in "${chosen[@]}"; do
+            [[ "$seen" == *" $c "* ]] && continue
+            seen+="$c "
+            to_add_domains+=("${DISCOVERED_DOMAINS[c - 1]}")
+            to_add_paths+=("${DISCOVERED_PATHS[c - 1]}")
+        done
+
+        # Confirmation screen — show exactly what will be added
+        clear_screen "force"
+        echo -e "${BOLD}${UNDERLINE}Add a site/domain > Confirm${RESET}"
+        echo ""
+        echo -e "${BOLD}These ${#to_add_domains[@]} site(s) will be added:${RESET}"
+        echo ""
+        for ((i = 0; i < ${#to_add_domains[@]}; i++)); do
+            echo -e "  ${GREEN}+${RESET} ${BOLD}${to_add_domains[i]}${RESET}  ${BLUE}${to_add_paths[i]}${RESET}"
+        done
+        echo ""
+        read -p "$(echo -e "${BOLD}${BLUE}Add these?  y = yes  ·  n = choose again  ·  q = cancel: ${RESET}")" confirm
+
+        case "$confirm" in
+        y | yes)
+            for ((i = 0; i < ${#to_add_domains[@]}; i++)); do
+                DOMAINS+=("${to_add_domains[i]}")
+                PATHS+=("${to_add_paths[i]}")
+            done
+            update_definitions # Save definitions after adding the selected sites
+            clear_screen "force"
+            echo -e "${GREEN}${#to_add_domains[@]} site(s) added successfully.${RESET}"
             echo ""
             return
             ;;
-        a)
-            for ((i = 0; i < count; i++)); do selected[i]=1; done
-            echo -e "${GREEN}All ${count} site(s) selected.${RESET}"
-            ;;
-        n)
-            for ((i = 0; i < count; i++)); do selected[i]=0; done
-            echo -e "${YELLOW}All site(s) deselected.${RESET}"
-            ;;
-        l | list)
-            show_list=true
-            ;;
-        d)
-            break
+        q)
+            clear_screen "force"
+            echo -e "${YELLOW}Cancelled, nothing was added.${RESET}"
+            echo ""
+            return
             ;;
         *)
-            # Parse the comma-separated list of indexes. Validate every entry
-            # first, then apply the toggles — so one bad entry changes nothing.
-            local valid_input=true
-            local -a ms_tokens=()
-            local -a toggle_list=()
-            local token idx
-            IFS=',' read -ra ms_tokens <<<"$ms_choice"
-            for token in "${ms_tokens[@]}"; do
-                token="${token//[[:space:]]/}" # tolerate stray spaces, tabs, CR
-                [ -z "$token" ] && continue    # skip empty fields (eg; trailing comma)
-                if [[ "$token" =~ ^[0-9]+$ ]] && [ "$token" -ge 1 ] && [ "$token" -le "$count" ]; then
-                    toggle_list+=("$token")
-                else
-                    valid_input=false
-                fi
-            done
-            if [ "$valid_input" == true ] && [ "${#toggle_list[@]}" -gt 0 ]; then
-                for token in "${toggle_list[@]}"; do
-                    idx=$((token - 1))
-                    if [ "${selected[idx]}" == "1" ]; then
-                        selected[idx]=0
-                    else
-                        selected[idx]=1
-                    fi
-                done
-                echo -e "${GREEN}Toggled ${#toggle_list[@]} item(s).${RESET} ( type 'l' to show the updated list )"
-            else
-                echo -e "${RED}Invalid input.${RESET} Enter numbers between 1 and ${count} ( eg; 1,3,4 ), or a / n / l / d / q."
-            fi
+            # 'n' or anything else: go back and choose again
+            msg=""
             ;;
         esac
     done
-
-    # Build the final selection
-    local -a to_add_domains=()
-    local -a to_add_paths=()
-    for ((i = 0; i < count; i++)); do
-        if [ "${selected[i]}" == "1" ]; then
-            to_add_domains+=("${DISCOVERED_DOMAINS[i]}")
-            to_add_paths+=("${DISCOVERED_PATHS[i]}")
-        fi
-    done
-
-    if [ "${#to_add_domains[@]}" -eq 0 ]; then
-        clear_screen "force"
-        echo -e "${YELLOW}No sites were selected, nothing was added.${RESET}"
-        echo ""
-        return
-    fi
-
-    # Show exactly what will be added and confirm before saving
-    clear_screen "force"
-    echo -e "${BOLD}${UNDERLINE}Add a site/domain > Auto-discover${RESET}"
-    echo ""
-    echo -e "${BOLD}The following ${#to_add_domains[@]} site(s) will be added:${RESET}"
-    for ((i = 0; i < ${#to_add_domains[@]}; i++)); do
-        echo -e "  - ${BOLD}${to_add_domains[i]}${RESET}  ${BLUE}${to_add_paths[i]}${RESET}"
-    done
-    echo ""
-    read -p "$(echo -e "${BOLD}${BLUE}Add these site(s)? (y/n): ${RESET}")" confirm
-    if [[ "$confirm" != "y" && "$confirm" != "yes" ]]; then
-        clear_screen "force"
-        echo -e "${YELLOW}Cancelled, nothing was added.${RESET}"
-        echo ""
-        return
-    fi
-
-    for ((i = 0; i < ${#to_add_domains[@]}; i++)); do
-        DOMAINS+=("${to_add_domains[i]}")
-        PATHS+=("${to_add_paths[i]}")
-    done
-    update_definitions # Save definitions after adding the selected sites
-    clear_screen "force"
-    echo -e "${GREEN}${#to_add_domains[@]} site(s) added successfully.${RESET}"
-    echo ""
 }
 
 # Function to delete domain and path
