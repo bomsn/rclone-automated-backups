@@ -116,14 +116,66 @@ update_definitions_state() {
     fi
 }
 
-# Function to add or update domain and user
+# Resolve the actual WordPress files directory for a given path.
+# Echoes the resolved path, or an empty string when no WordPress install is found.
+# Handles WordOps (wp-config.php in the parent + an htdocs/ dir), a path that already
+# points at htdocs, and the standard layout (wp-config.php in the same directory).
+derive_wp_path() {
+    local path="${1%/}"
+    if [ -f "$path/wp-config.php" ] && [ -d "$path/htdocs" ]; then
+        echo "$path/htdocs"
+    elif [ -f "${path%/htdocs}/wp-config.php" ] && [ -d "$path" ]; then
+        echo "$path"
+    elif [ -f "$path/wp-config.php" ]; then
+        echo "$path"
+    else
+        echo ""
+    fi
+}
+
+# Dispatcher: let the user pick how to add a site ( auto-discovery or manual entry )
 add_domain() {
+
+    clear_screen "force"
+
+    echo -e "${BOLD}${UNDERLINE}Add a site/domain${RESET}"
+    echo ""
+
+    local original_ps3="$PS3"
+    PS3="$(echo -e "${BOLD}${BLUE}Type the desired option number to continue: ${RESET}")"
+    select method in "Auto-discover WordPress sites" "Enter the path manually" "Go back"; do
+        case "$method" in
+        "Auto-discover WordPress sites")
+            PS3="$original_ps3"
+            add_domain_discover
+            return
+            ;;
+        "Enter the path manually")
+            PS3="$original_ps3"
+            add_domain_manual
+            return
+            ;;
+        "Go back")
+            PS3="$original_ps3"
+            clear_screen "force"
+            return
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Please select a valid option.${RESET}"
+            ;;
+        esac
+    done
+    PS3="$original_ps3"
+}
+
+# Function to add a domain/path by manually typing them in
+add_domain_manual() {
 
     clear_screen "force"
 
     read -p "$(echo -e "${BOLD}${BLUE}Enter a domain${RESET} ${BLUE}( or q to go back ): ${RESET}")" domain
 
-    if [ $domain == "q" ]; then
+    if [ "$domain" == "q" ]; then
         manage_domains
         return
     fi
@@ -135,6 +187,11 @@ add_domain() {
         clear_screen "force"
         echo -e "${RED}"${domain}" is not a valid domain.${RESET}"
         return
+    fi
+
+    # Show the user how their input was interpreted ( eg; protocol/www stripped )
+    if [ "$domain" != "$sanitized_domain" ]; then
+        echo -e "${YELLOW}Domain interpreted as:${RESET} ${BOLD}$sanitized_domain${RESET}"
     fi
 
     # Check if the domain already exists in the DOMAINS array
@@ -155,8 +212,8 @@ add_domain() {
     # Get the WordPress installation dir for that domain
     read -p "$(echo -e "${BOLD}${BLUE}Enter the WordPress installation's full path for $sanitized_domain${RESET} ${BLUE}( or q to go back ): ${RESET}")" path
 
-    if [ $path == "q" ]; then
-        add_domain
+    if [ "$path" == "q" ]; then
+        add_domain_manual
         return
     fi
 
@@ -168,19 +225,10 @@ add_domain() {
     # Remove any trailing slash
     path="${path%/}"
 
-    # Check for WordPress installation in different possible locations
-    local wp_path=""
+    # Resolve the WordPress files directory ( WordOps / htdocs / standard layouts )
+    local wp_path=$(derive_wp_path "$path")
 
-    # Check WordOps structure first (wp-config.php in parent, files in htdocs)
-    if [ -f "$path/wp-config.php" ] && [ -d "$path/htdocs" ]; then
-        wp_path="$path/htdocs"
-    # Check if path points to htdocs directory
-    elif [ -f "${path%/htdocs}/wp-config.php" ] && [ -d "$path" ]; then
-        wp_path="$path"
-    # Check standard structure (everything in same directory)
-    elif [ -f "$path/wp-config.php" ]; then
-        wp_path="$path"
-    else
+    if [ -z "$wp_path" ]; then
         # No WordPress installation found
         clear_screen "force"
         echo -e "${RED}We could not find a WordPress installation under $path ${RESET}"
@@ -192,7 +240,185 @@ add_domain() {
     PATHS+=("$wp_path") # Store the path to WordPress files
     update_definitions   # Save definitions after each addition
     clear_screen "force"
+    # Confirm the result, showing the resolved path so any auto-correction is visible
     echo -e "${GREEN}Domain $sanitized_domain added successfully.${RESET}"
+    echo -e "${GREEN}WordPress files path:${RESET} ${BOLD}$wp_path${RESET}"
+}
+
+# Scan common web roots for WordPress installs and let the user pick which to add
+add_domain_discover() {
+
+    clear_screen "force"
+    echo -e "${BOLD}${UNDERLINE}Add a site/domain > Auto-discover${RESET}"
+    echo ""
+    echo -e "${YELLOW}Scanning the server for WordPress installations, this may take a moment ...${RESET}"
+
+    # Candidate web roots across common stacks ( generic, WordOps, cPanel, Plesk,
+    # OpenLiteSpeed/CyberPanel, Bitnami ). Roots that don't exist are simply skipped.
+    local candidate_roots=("/var/www" "/srv/www" "/usr/share/nginx/html" "/home" "/opt/bitnami")
+
+    # Collect wp-config.php locations ( depth-limited, heavy dirs pruned, errors hidden )
+    local config_files=()
+    local root cfg
+    for root in "${candidate_roots[@]}"; do
+        [ -d "$root" ] || continue
+        while IFS= read -r cfg; do
+            [ -n "$cfg" ] && config_files+=("$cfg")
+        done < <(sudo find "$root" -maxdepth 5 -type d \( -name node_modules -o -name '.git' -o -path '*/wp-content/uploads' \) -prune -o -name wp-config.php -type f -print 2>/dev/null)
+    done
+
+    # Resolve each install and read its real domain ( de-duplicated by path and domain )
+    DISCOVERED_DOMAINS=()
+    DISCOVERED_PATHS=()
+    local seen_paths=" "
+    local cfg_dir wp_path owner site_domain existing already
+    for cfg in "${config_files[@]}"; do
+        cfg_dir="$(dirname "$cfg")"
+        wp_path=$(derive_wp_path "$cfg_dir")
+        [ -z "$wp_path" ] && continue
+        # Skip a path we already resolved ( WordOps yields the same install twice )
+        [[ "$seen_paths" == *" $wp_path "* ]] && continue
+        seen_paths+="$wp_path "
+
+        owner=$(sudo stat -c "%U" "$wp_path" 2>/dev/null)
+        # Read the canonical domain from WordPress itself ( stack-agnostic )
+        site_domain=""
+        if [ -n "$owner" ]; then
+            site_domain=$(sudo -u "$owner" -s -- wp option get siteurl --path="$wp_path" --skip-plugins --skip-themes 2>/dev/null)
+        fi
+        site_domain=$(echo "$site_domain" | sed -e 's|^https://||' -e 's|^http://||' -e 's|^www\.||' -e 's|/.*$||')
+        # Fall back to the directory name when wp-cli is unavailable or fails
+        if [ -z "$site_domain" ]; then
+            site_domain="$(basename "$cfg_dir")"
+            if [[ "$site_domain" == "htdocs" || "$site_domain" == "httpdocs" || "$site_domain" == "public_html" ]]; then
+                site_domain="$(basename "$(dirname "$cfg_dir")")"
+            fi
+        fi
+
+        # Skip installs whose domain is already saved or already discovered in this run
+        already=false
+        for existing in "${DOMAINS[@]}" "${DISCOVERED_DOMAINS[@]}"; do
+            if [ "$existing" == "$site_domain" ]; then
+                already=true
+                break
+            fi
+        done
+        [ "$already" == true ] && continue
+
+        DISCOVERED_DOMAINS+=("$site_domain")
+        DISCOVERED_PATHS+=("$wp_path")
+    done
+
+    if [ ${#DISCOVERED_DOMAINS[@]} -eq 0 ]; then
+        clear_screen "force"
+        echo -e "${YELLOW}No new WordPress installations were discovered automatically.${RESET}"
+        echo ""
+        read -p "$(echo -e "${BOLD}${BLUE}Add a site manually instead? (y/n): ${RESET}")" go_manual
+        if [[ "$go_manual" == "y" || "$go_manual" == "yes" ]]; then
+            add_domain_manual
+        fi
+        return
+    fi
+
+    # Let the user choose which discovered sites to add
+    multiselect_discovered
+}
+
+# Render a toggle list of discovered sites ( DISCOVERED_DOMAINS / DISCOVERED_PATHS )
+# and add the ones the user selects
+multiselect_discovered() {
+
+    local count=${#DISCOVERED_DOMAINS[@]}
+    # Selection state: 1 = selected, 0 = not. Everything is pre-selected.
+    local selected=()
+    local i
+    for ((i = 0; i < count; i++)); do
+        selected[i]=1
+    done
+
+    while true; do
+        clear_screen "force"
+        echo -e "${BOLD}${UNDERLINE}Add a site/domain > Auto-discover${RESET}"
+        echo ""
+        echo -e "${GREEN}Discovered ${count} WordPress site(s).${RESET} Pick the ones you want to add:"
+        echo ""
+        for ((i = 0; i < count; i++)); do
+            local mark="[ ]"
+            if [ "${selected[i]}" == "1" ]; then
+                mark="${GREEN}[x]${RESET}"
+            fi
+            echo -e "  $mark $((i + 1)). ${BOLD}${DISCOVERED_DOMAINS[i]}${RESET}  ${BLUE}${DISCOVERED_PATHS[i]}${RESET}"
+        done
+        echo ""
+        echo -e "${YELLOW}Enter a number ( or a list like 1,3,4 ) to toggle, 'a' = all, 'n' = none, 'd' = done, 'q' = cancel.${RESET}"
+        # A failed read ( eg; end-of-input ) is treated as a cancel to avoid looping forever
+        if ! read -p "$(echo -e "${BOLD}${BLUE}Your choice: ${RESET}")" ms_choice; then
+            clear_screen "force"
+            echo -e "${YELLOW}Discovery cancelled, nothing was added.${RESET}"
+            echo ""
+            return
+        fi
+
+        case "$ms_choice" in
+        q)
+            clear_screen "force"
+            echo -e "${YELLOW}Discovery cancelled, nothing was added.${RESET}"
+            echo ""
+            return
+            ;;
+        a)
+            for ((i = 0; i < count; i++)); do selected[i]=1; done
+            ;;
+        n)
+            for ((i = 0; i < count; i++)); do selected[i]=0; done
+            ;;
+        d)
+            break
+            ;;
+        *)
+            # Toggle every valid, comma-separated index
+            IFS=',' read -ra ms_tokens <<<"$ms_choice"
+            local valid_input=true
+            local token idx
+            for token in "${ms_tokens[@]}"; do
+                token="${token//[[:space:]]/}"
+                if [[ "$token" =~ ^[0-9]+$ ]] && [ "$token" -ge 1 ] && [ "$token" -le "$count" ]; then
+                    idx=$((token - 1))
+                    if [ "${selected[idx]}" == "1" ]; then
+                        selected[idx]=0
+                    else
+                        selected[idx]=1
+                    fi
+                else
+                    valid_input=false
+                fi
+            done
+            if [ "$valid_input" == false ]; then
+                echo -e "${RED}Invalid input, please try again.${RESET}"
+                read -p "$(echo -e "${BLUE}Press Enter to continue ...${RESET}")" _
+            fi
+            ;;
+        esac
+    done
+
+    # Add the selected sites to the domain/path arrays
+    local added=0
+    for ((i = 0; i < count; i++)); do
+        if [ "${selected[i]}" == "1" ]; then
+            DOMAINS+=("${DISCOVERED_DOMAINS[i]}")
+            PATHS+=("${DISCOVERED_PATHS[i]}")
+            added=$((added + 1))
+        fi
+    done
+
+    clear_screen "force"
+    if [ "$added" -gt 0 ]; then
+        update_definitions # Save definitions after adding the selected sites
+        echo -e "${GREEN}${added} site(s) added successfully.${RESET}"
+    else
+        echo -e "${YELLOW}No sites were selected, nothing was added.${RESET}"
+    fi
+    echo ""
 }
 
 # Function to delete domain and path
@@ -429,11 +655,14 @@ collect_backup_settings() {
     read -p "$(echo -e "${BOLD}${BLUE}Enter folders to exclude (comma-separated eg; wp-admin, wp-includes; or leave empty for none): ${RESET}")" EXCLUDED_ITEMS
 
     # Collect backup type
+    # full      = whole site files + database in one archive
+    # incremental = restic-based snapshots of the whole site ( requires restic )
+    # database  = database-only backup ( lightweight, ideal for a daily schedule )
+    PS3="$(echo -e "${BOLD}${BLUE}Choose backup type: ${RESET}")"
     if [ $RESTIC_AVAILABLE == true ]; then
-        PS3="$(echo -e "${BOLD}${BLUE}Choose backup type: ${RESET}")"
-        select type in "full" "incremental"; do
+        select type in "full" "incremental" "database"; do
             case $type in
-            full | incremental)
+            full | incremental | database)
                 BACKUP_TYPE="$type"
                 break
                 ;;
@@ -443,8 +672,19 @@ collect_backup_settings() {
             esac
         done
     else
-        BACKUP_TYPE="full"
+        select type in "full" "database"; do
+            case $type in
+            full | database)
+                BACKUP_TYPE="$type"
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid option. Please select a valid type.${RESET}"
+                ;;
+            esac
+        done
     fi
+    PS3="$original_ps3" # Restore the original PS3 value
 
     # Collect restic password
     if [ $BACKUP_TYPE == "incremental" ]; then
@@ -751,9 +991,10 @@ if [ ! -d "\${tmp_path}" ]; then
     sudo mkdir -p "\${tmp_path}"
 fi
 
-# Find and delete any 'tar.gz.tmp' or 'sql' files that are older than 48 hours ( failed backups )
+# Find and delete any 'tar.gz.tmp', 'sql' or 'sql.gz.tmp' files that are older than 48 hours ( failed backups )
 sudo find "\${tmp_path}" -type f -name "*.tar.gz.tmp" -mmin +2880 -exec rm {} \;
 sudo find "\${tmp_path}" -type f -name "*.sql" -mmin +2880 -exec rm {} \;
+sudo find "\${tmp_path}" -type f -name "*.sql.gz.tmp" -mmin +2880 -exec rm {} \;
 
 # Make sure out logs files doesn't get too big
 if [ -f "$LOG_FILE" ]; then
@@ -802,7 +1043,11 @@ wp_owner=\$(sudo stat -c "%U" \${domain_path})
 db_name=\$(sudo -u "\${wp_owner}" -s -- wp config get DB_NAME --path="\${domain_path}")
 db_filename=\${hash}_\${domain//./_}_\${db_name}_incremental.sql
 # We'll export the database and move it to our current directory as a 'tmp' file
-sudo -u "\${wp_owner}" -s -- wp db export "\${domain_path}/\${db_filename}" --path="\${domain_path}"
+if ! sudo -u "\${wp_owner}" -s -- wp db export "\${domain_path}/\${db_filename}" --path="\${domain_path}"; then
+    echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >>"$LOG_FILE"
+    sudo rm -f "\${domain_path}/\${db_filename}"
+    exit 1
+fi
 
 restic_password=${restic_password}
 
@@ -811,9 +1056,17 @@ echo "[\${timestamp}] - Sending the backup to 'rclone' "\${rclone_remote}" remot
 # Use restic to save a new backup to rclone remote
 if [ \${call_type} == "restore" ]; then
     # We will backup the whole folder when it's a pre-restore backup ( no excludes )
-    sudo RESTIC_PASSWORD="\${restic_password}" restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" backup "\$domain_path/"
+    if ! sudo RESTIC_PASSWORD="\${restic_password}" restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" backup "\$domain_path/"; then
+        echo "[\${timestamp}] ERROR: restic backup failed. Aborting backup." >>"$LOG_FILE"
+        sudo rm -f "\${domain_path}/\${db_filename}"
+        exit 1
+    fi
 else
-    sudo RESTIC_PASSWORD="\${restic_password}" restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" backup "\$domain_path/" ${excludes}
+    if ! sudo RESTIC_PASSWORD="\${restic_password}" restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" backup "\$domain_path/" ${excludes}; then
+        echo "[\${timestamp}] ERROR: restic backup failed. Aborting backup." >>"$LOG_FILE"
+        sudo rm -f "\${domain_path}/\${db_filename}"
+        exit 1
+    fi
 fi
 
 echo "[\${timestamp}] - backup sent to the remote location successfully" >>"$LOG_FILE"
@@ -826,6 +1079,69 @@ echo "[\${timestamp}] - Delete backups older than \${retention_period} days from
 
 # Delete old backups from remote ( retention logic )
 sudo RESTIC_PASSWORD="\${restic_password}" restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" forget --keep-within "\${retention_period}d" --prune
+
+EOF
+
+        elif [ $remote_backup_type == "database" ]; then
+            # Add the necessary commands for database-only backups (append to file, note >>)
+            cat <<EOF >>"$script_path"
+
+# Get the wp installation folder owner
+wp_owner=\$(sudo stat -c "%U" \${domain_path})
+
+# Use a dedicated temp directory for database backups
+wp_owner_directory="/tmp/wp_db_backup"
+
+echo "[\${timestamp}] - WP folder owner found: '\${wp_owner}'" >> "$LOG_FILE"
+echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "$LOG_FILE"
+
+# Create tmp directory with proper permissions if it doesn't exist
+if [ ! -d "\${wp_owner_directory}" ]; then
+    sudo mkdir -p "\${wp_owner_directory}"
+    sudo chown \${wp_owner}:\${wp_owner} "\${wp_owner_directory}"
+    sudo chmod 755 "\${wp_owner_directory}"
+fi
+
+# Get the database name and construct the db backup file name and path
+db_name=\$(sudo -u "\${wp_owner}" -s -- wp config get DB_NAME --path="\${domain_path}")
+db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
+
+# Export the database with proper permissions
+if ! sudo -u "\${wp_owner}" -s -- wp db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}"; then
+    echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
+    sudo rm -f "\${wp_owner_directory}/\${db_filename}"
+    exit 1
+fi
+
+echo "[\${timestamp}] - Compressing the database export" >> "$LOG_FILE"
+
+# Compress the SQL dump to reduce transfer size and remote storage usage
+if ! sudo gzip -f "\${wp_owner_directory}/\${db_filename}"; then
+    echo "[\${timestamp}] ERROR: database compression failed. Aborting backup." >> "$LOG_FILE"
+    sudo rm -f "\${wp_owner_directory}/\${db_filename}" "\${wp_owner_directory}/\${db_filename}.gz"
+    exit 1
+fi
+db_archive="\${wp_owner_directory}/\${db_filename}.gz"
+
+echo "[\${timestamp}] - Sending the database backup to remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+
+# Copy the compressed database backup to the remote location using rclone
+if ! sudo rclone copy "\${db_archive}" \${rclone_remote}:\${remote_backup_location}; then
+    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "$LOG_FILE"
+    sudo rm -f "\${db_archive}"
+    exit 1
+fi
+
+echo "[\${timestamp}] - database backup sent to the remote location successfully" >> "$LOG_FILE"
+echo "[\${timestamp}] - Delete the internally generated database backup to free space" >> "$LOG_FILE"
+
+# Delete the locally generated database archive
+sudo rm -f "\${db_archive}"
+
+echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+
+# Delete old backups from remote ( retention logic )
+sudo rclone delete --min-age \${retention_period}d "\${rclone_remote}":"\${remote_backup_location}"
 
 EOF
 
@@ -860,7 +1176,11 @@ db_name=\$(sudo -u "\${wp_owner}" -s -- wp config get DB_NAME --path="\${domain_
 db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
 
 # Export the database with proper permissions
-sudo -u "\${wp_owner}" -s -- wp db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}"
+if ! sudo -u "\${wp_owner}" -s -- wp db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}"; then
+    echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
+    sudo rm -f "\${wp_owner_directory}/\${db_filename}"
+    exit 1
+fi
 
 if [ \${call_type} == "restore" ]; then
     echo "[\${timestamp}] - Generating pre-restore backup archive" >> "$LOG_FILE"
@@ -896,19 +1216,19 @@ else
 fi
 
 # If direct tar failed, try cp method
-if [ "$backup_success" = false ]; then
+if [ "\$backup_success" = false ]; then
     # Create temporary directory for cp method
     tmp_backup_dir="\${wp_owner_directory}/tmp_backup_\${backup_date}"
     
     # Check available space before copying
-    required_space=$(sudo du -sb "${domain_path}" | cut -f1)
-    available_space=$(sudo df -B1 "${wp_owner_directory}" | awk 'NR==2 {print $4}')
-    
-    if [ "$available_space" -gt "$((required_space * 2))" ]; then
+    required_space=\$(sudo du -sb "\${domain_path}" | cut -f1)
+    available_space=\$(sudo df -B1 "\${wp_owner_directory}" | awk 'NR==2 {print \$4}')
+
+    if [ "\$available_space" -gt "\$((required_space * 2))" ]; then
         echo "[\${timestamp}] - Sufficient space available for cp method" >> "$LOG_FILE"
         
         # Create temp directory and copy files
-        sudo mkdir -p "${tmp_backup_dir}"
+        sudo mkdir -p "\${tmp_backup_dir}"
         
         if sudo test "\${call_type}" = "restore"; then
             sudo cp -a "\${domain_path}/." "\${tmp_backup_dir}/"
@@ -916,7 +1236,7 @@ if [ "$backup_success" = false ]; then
             sudo cp -a "\${domain_path}/." "\${tmp_backup_dir}/"
             # Apply excludes by removing excluded files/directories
             for exclude in $excludes; do
-                exclude_path=$(echo "$exclude" | sed 's/--exclude=//')
+                exclude_path=\$(echo "\$exclude" | sed 's/--exclude=//')
                 sudo rm -rf "\${tmp_backup_dir}/\${exclude_path}"
             done
         fi
@@ -928,13 +1248,13 @@ if [ "$backup_success" = false ]; then
         fi
         
         # Clean up temp directory
-        sudo rm -rf "${tmp_backup_dir}"
+        sudo rm -rf "\${tmp_backup_dir}"
     else
         echo "[\${timestamp}] - Insufficient space for cp method" >> "$LOG_FILE"
     fi
 fi
 
-if [ "$backup_success" = false ]; then
+if [ "\$backup_success" = false ]; then
     echo "[\${timestamp}] ERROR: All backup methods failed" >> "$LOG_FILE"
     # Cleanup any temporary files
     sudo rm -f "\${backup_filename}.tmp"
@@ -951,7 +1271,11 @@ echo "[\${timestamp}] - backup archive generated: "\${backup_filename}"" >> "$LO
 echo "[\${timestamp}] - Sending the backup file to remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
 
 # Copy the generated backup to the remote location using rclone
-sudo rclone copy \$backup_filename \${rclone_remote}:\${remote_backup_location}
+if ! sudo rclone copy \$backup_filename \${rclone_remote}:\${remote_backup_location}; then
+    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "$LOG_FILE"
+    sudo rm -f "\${backup_filename}" "\${wp_owner_directory}/\${db_filename}"
+    exit 1
+fi
 
 echo "[\${timestamp}] - backup file sent to the remote location successfully" >> "$LOG_FILE"
 echo "[\${timestamp}] - Delete the internally generated backup files to free space" >> "$LOG_FILE"
@@ -985,8 +1309,13 @@ EOF
             sudo touch "$CRON_FILE"     # Create the cron file
             sudo chmod 644 "$CRON_FILE" # Ensure the file has the correct permissions
         fi
-        # Create the cron file with the necessary cron job
-        echo "$cron_expression root /bin/bash $PWD/$script_path" >>"$CRON_FILE"
+        # Add the cron job, unless an identical entry ( or one for the same script ) already exists
+        local cron_line="$cron_expression root /bin/bash $PWD/$script_path"
+        if grep -Fqx "$cron_line" "$CRON_FILE" 2>/dev/null || grep -Fq "$(basename "$script_path")" "$CRON_FILE" 2>/dev/null; then
+            echo -e "${YELLOW}A cron entry for this backup already exists, skipping cron update.${RESET}"
+        else
+            echo "$cron_line" >>"$CRON_FILE"
+        fi
         # Show success message
         clear_screen "force"
         echo -e "${BOLD}${GREEN}Your automated backup for $backup_domain has been created successfully.${RESET}"
@@ -1308,7 +1637,13 @@ manage_automated_backups() {
                         echo ""
                         echo -e "${YELLOW}Taking a pre-restore backup ...${RESET}"
                         # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
-                        sudo bash $selected_backup_script "restore"
+                        # Abort the restore if the pre-restore backup did not succeed ( protects the live site )
+                        if ! sudo bash "$selected_backup_script" "restore"; then
+                            restore_cursor_position
+                            echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your site.${RESET}"
+                            echo ""
+                            break
+                        fi
 
                         # Clear the destination folder if "clear and restore is selected"
                         if [[ $restore_approach_choice == "2" ]]; then
@@ -1328,6 +1663,144 @@ manage_automated_backups() {
                         restore_cursor_position
                         echo -e "${YELLOW}restore has been aborted.${RESET}"
                         echo ""
+                    fi
+                elif [ "$selected_backup_type" == "database" ]; then
+
+                    echo ""
+                    echo -e "${YELLOW}Pulling remote database backups count & total size...${RESET}"
+
+                    # Show backups size and count
+                    echo ""
+                    sudo rclone size "${selected_backup_rclone_remote}":"${selected_backup_remote_location}" --include "${selected_backup_hash}_*"
+
+                    echo ""
+                    echo -e "${YELLOW}Pulling remote database backups list...${RESET}"
+
+                    # Capture the list of backup files
+                    local backup_list_output=$(sudo rclone ls "${selected_backup_rclone_remote}":"${selected_backup_remote_location}" --include "${selected_backup_hash}_*")
+
+                    # Check if the backup list is empty
+                    if [ -z "$backup_list_output" ]; then
+                        restore_cursor_position
+                        echo -e "${YELLOW}No remote database backups found.${RESET}"
+                        echo ""
+                        break # break out of the select statement to restart the while loop
+                    fi
+
+                    # Capture the list of remote backup files
+                    local remote_backup_files=()
+                    local remote_backup_lines=()
+                    while IFS= read -r line; do
+                        # Remove leading spaces from the line
+                        line="${line#"${line%%[![:space:]]*}"}"
+
+                        # Extract the size and filename from the line
+                        local remote_backup_size="${line%% *}" # Extract size (everything before the first space)
+                        local remote_backup_name="${line#* }"  # Extract filename (everything after the first space)
+
+                        # Remove the MD5 prefix from remote_backup_name
+                        local noprefix_remote_backup_name="${remote_backup_name#*_}"
+
+                        # Extract the date and time from the filename ( database backups end in .sql.gz )
+                        if [[ "$noprefix_remote_backup_name" =~ ([0-9]{2}-[0-9]{2}-[0-9]{4})_([0-9]{2}-[0-9]{2}).*\.sql\.gz ]]; then
+                            backup_file_date="${BASH_REMATCH[1]}"
+                            backup_file_time="${BASH_REMATCH[2]//-/:}"
+
+                            # Format the time to display in 12-hour format with AM/PM
+                            backup_file_time=$(date -d "$backup_file_time" +"%I:%M%p")
+
+                            # Format the size in a human-readable format (MB, GB, etc.)
+                            backup_size_readable=$(numfmt --to=iec --suffix=B --format="%.2f" "$remote_backup_size")
+
+                            # Add the formatted line to the remote_backup_files array
+                            remote_backup_files+=("$remote_backup_name")
+                            remote_backup_lines+=("$backup_file_date $backup_file_time $backup_size_readable $noprefix_remote_backup_name")
+                        fi
+                    done <<<"$backup_list_output"
+
+                    # Display the backup list as a table with aligned headers
+                    echo ""
+                    echo -e "${BOLD}${YELLOW}#   Date        Time     Size     Name${RESET}"
+                    # Calculate the maximum length of the index numbers to align them properly
+                    local max_index_length="${#remote_backup_lines[@]}"
+                    while ((max_index_length > 0)); do
+                        max_index_length=$((max_index_length / 10))
+                        local index_length=$((index_length + 1))
+                    done
+
+                    for ((i = 0; i < ${#remote_backup_lines[@]}; i++)); do
+                        # Calculate the padding for the index numbers
+                        local padding_length=$((index_length - ${#i}))
+                        local padding=""
+                        for ((j = 0; j < padding_length; j++)); do
+                            padding+=" "
+                        done
+                        local item_index=$((i + 1))
+                        echo -e "${BOLD}${YELLOW}${padding}${item_index}. ${RESET}${remote_backup_lines[i]}"
+                    done | column -t
+
+                    # Ask the user to select a backup for restoration
+                    read -p "$(echo -e "${BOLD}${BLUE}Enter the number of the backup to restore (1-${#remote_backup_lines[@]}) ${BLUE}( or q to go back ): ${RESET}")" restore_choice
+
+                    # Go back if the user typed q
+                    if [ "$restore_choice" == "q" ]; then
+                        restore_cursor_position
+                        break # break out of the select statement to restart the while loop
+                    fi
+
+                    # Validate the user's choice
+                    if [[ ! "$restore_choice" =~ ^[0-9]+$ ]] || [ "$restore_choice" -lt 1 ] || [ "$restore_choice" -gt "${#remote_backup_lines[@]}" ]; then
+                        restore_cursor_position
+                        echo -e "${RED}Invalid choice. Please enter a valid number.${RESET}"
+                        break # break out of the select statement to restart the while loop
+                    fi
+
+                    # Get the selected backup based on the user's choice
+                    local selected_remote_backup="${remote_backup_files[restore_choice - 1]}"
+
+                    # Confirm with the user before restoring the database
+                    echo ""
+                    echo -e "You selected: ${BOLD}$selected_remote_backup${RESET}"
+                    echo -e "${BOLD}${YELLOW}NOTE: ${RESET}${YELLOW}This overwrites the live database for '${selected_backup_domain}'. Site files are NOT touched.${RESET}"
+                    read -p "$(echo -e "${BOLD}${BLUE}Proceed with the database restore? (y/n)${RESET} ${BLUE}( or q to go back ): ${RESET}")" db_restore_confirm
+
+                    # Go back if the user typed q
+                    if [ "$db_restore_confirm" == "q" ]; then
+                        restore_cursor_position
+                        break # break out of the select statement to restart the while loop
+                    fi
+
+                    # Handle the user's restore choice
+                    if [[ "$db_restore_confirm" == "y" || "$db_restore_confirm" == "yes" ]]; then
+                        restore_cursor_position
+
+                        # Show a pre-restore backup notice
+                        echo ""
+                        echo -e "${YELLOW}Taking a pre-restore database backup ...${RESET}"
+                        # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
+                        # Abort the restore if the pre-restore backup did not succeed ( protects the live database )
+                        if ! sudo bash "$selected_backup_script" "restore"; then
+                            restore_cursor_position
+                            echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your database.${RESET}"
+                            echo ""
+                            break
+                        fi
+
+                        # Show a restoration notice
+                        echo ""
+                        echo -e "${YELLOW}Restoring ${RESET}${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to${RESET} ${BOLD}${YELLOW}$selected_backup_domain${RESET}"
+                        # Pull the compressed database backup from remote
+                        sudo rclone copyto --progress "${selected_backup_rclone_remote}":"${selected_backup_remote_location}${selected_remote_backup}" "${TMP_DIR}/${selected_remote_backup}.tmp"
+
+                        # Decompress the dump into the site path so the shared import step below picks it up
+                        sudo bash -c "gunzip -c '${TMP_DIR}/${selected_remote_backup}.tmp' > '${selected_backup_path%/}/${selected_remote_backup%.gz}'"
+                        sudo rm "${TMP_DIR}/${selected_remote_backup}.tmp"
+
+                    else
+                        restore_cursor_position
+                        echo -e "${BOLD}${YELLOW}'$selected_remote_backup'${RESET} ${YELLOW}restoration has been aborted.${RESET}"
+                        echo ""
+                        break
                     fi
                 else
 
@@ -1449,7 +1922,13 @@ manage_automated_backups() {
                         echo ""
                         echo -e "${YELLOW}Taking a pre-restore backup ...${RESET}"
                         # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
-                        sudo bash $selected_backup_script "restore"
+                        # Abort the restore if the pre-restore backup did not succeed ( protects the live site )
+                        if ! sudo bash "$selected_backup_script" "restore"; then
+                            restore_cursor_position
+                            echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your site.${RESET}"
+                            echo ""
+                            break
+                        fi
 
                         # Show a restoration notice
                         echo ""
