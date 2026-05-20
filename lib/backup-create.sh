@@ -205,6 +205,10 @@ generate_backup_script() {
     local restic_password=""
     local rclone_remote_name=""
     local rclone_remote_valid=false
+    # Lock wait timeout baked into the generated script: 18h is long enough that
+    # the last site in a long nightly queue still gets its turn, while a lock
+    # stuck beyond 18h is bypassed before the next night's run.
+    local lock_timeout=64800
 
     # Pull restic password if an incremental backup is defined
     if [ $remote_backup_type == "incremental" ]; then
@@ -477,6 +481,15 @@ Server time: \$(date)
     fi
 }
 trap backup_failure_notify EXIT
+
+# --- Serialize backup runs across all sites ( prevents server overload ) ---
+# Acquire a shared lock so that, however many cron entries fire together, the
+# heavy work ( tar / rclone / restic ) runs strictly one site at a time.
+exec {lock_fd}>"$LOCK_FILE"
+if ! flock -w $lock_timeout "\${lock_fd}"; then
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP SKIPPED (\${type}): lock busy, timed out for '\${domain}'" >> "$LOG_FILE"
+    exit 0
+fi
 
 echo "[\${timestamp}] BACK UP STARTED (\${type}): Performing $backup_time $backup_frequency backup for '\${domain}'" >> "$LOG_FILE"
 echo "[\${timestamp}] - Exporting database" >> "$LOG_FILE"
