@@ -181,7 +181,53 @@ collect_backup_settings() {
     done
     PS3="$original_ps3" # Restore the original PS3 value
 
+    # Collect the day for weekly / monthly schedules ( a daily job has no "day" )
+    BACKUP_DAY=""
+    if [ "$BACKUP_FREQUENCY" == "weekly" ]; then
+        PS3="$(echo -e "${BOLD}${BLUE}Choose the day of week to run the backup: ${RESET}")"
+        select weekday in "Monday" "Tuesday" "Wednesday" "Thursday" "Friday" "Saturday" "Sunday" "none"; do
+            case $weekday in
+            Monday | Tuesday | Wednesday | Thursday | Friday | Saturday | Sunday)
+                BACKUP_DAY="$weekday"
+                break
+                ;;
+            none)
+                return
+                ;;
+            *)
+                echo -e "${RED}Invalid option. Please select a valid day.${RESET}"
+                ;;
+            esac
+        done
+        PS3="$original_ps3" # Restore the original PS3 value
+    elif [ "$BACKUP_FREQUENCY" == "monthly" ]; then
+        echo -e "${BLUE}Days 29-31 are not offered: they would silently skip shorter months.${RESET}"
+        PS3="$(echo -e "${BOLD}${BLUE}Choose the day of month to run the backup: ${RESET}")"
+        local month_day_options=()
+        local d
+        for ((d = 1; d <= 28; d++)); do month_day_options+=("$d"); done
+        month_day_options+=("Last day of month" "none")
+        select monthday in "${month_day_options[@]}"; do
+            if [ "$monthday" == "none" ]; then
+                return
+            elif [ "$monthday" == "Last day of month" ]; then
+                BACKUP_DAY="last"
+                break
+            elif [[ "$monthday" =~ ^[0-9]+$ ]] && [ "$monthday" -ge 1 ] && [ "$monthday" -le 28 ]; then
+                BACKUP_DAY="$monthday"
+                break
+            else
+                echo -e "${RED}Invalid option. Please select a valid day.${RESET}"
+            fi
+        done
+        PS3="$original_ps3" # Restore the original PS3 value
+    fi
+
     # Collect backup time preference
+    echo ""
+    echo -e "${YELLOW}Note: backup times use the SERVER's timezone, not your local time.${RESET}"
+    echo -e "${BOLD}Server timezone:${RESET} $(timedatectl show -p Timezone --value 2>/dev/null || date +%Z)"
+    echo -e "${BOLD}Server current time:${RESET} $(date '+%Y-%m-%d %H:%M:%S %Z')"
     PS3="$(echo -e "${BOLD}${BLUE}Choose backup time: ${RESET}")"
     options=("01:00" "02:00" "03:00" "04:00" "05:00" "06:00" "07:00" "08:00" "09:00" "10:00" "11:00" "12:00" "13:00" "14:00" "15:00" "16:00" "17:00" "18:00" "19:00" "20:00" "21:00" "22:00" "23:00" "00:00" "none")
     select time in "${options[@]}"; do
@@ -301,7 +347,11 @@ collect_backup_settings() {
     echo ""
     echo -e "${YELLOW}Your current backup configurations:${RESET}"
     echo -e "${BOLD}Backup Site:${RESET} $BACKUP_DOMAIN"
-    echo -e "${BOLD}Backup Frequency:${RESET} $BACKUP_FREQUENCY"
+    if [ -n "$BACKUP_DAY" ]; then
+        echo -e "${BOLD}Backup Frequency:${RESET} $BACKUP_FREQUENCY ( $BACKUP_DAY )"
+    else
+        echo -e "${BOLD}Backup Frequency:${RESET} $BACKUP_FREQUENCY"
+    fi
     echo -e "${BOLD}Backup Time:${RESET} $BACKUP_TIME"
     echo -e "${BOLD}Retention Period:${RESET} $RETENTION_PERIOD days"
     echo -e "${BOLD}Excluded Locations:${RESET} $EXCLUDED_ITEMS"
@@ -336,7 +386,10 @@ generate_backup_script() {
     local backup_domain="${BACKUP_DOMAIN}"
     local backup_path=""
     local backup_frequency="${BACKUP_FREQUENCY}"
+    local backup_day="${BACKUP_DAY}"
     local backup_time="${BACKUP_TIME}"
+    local schedule=""
+    local schedule_label=""
     local retention_period="${RETENTION_PERIOD}"
     local excluded_items="${EXCLUDED_ITEMS}"
     local remote_backup_location="${REMOTE_BACKUP_LOCATION}/"
@@ -388,16 +441,52 @@ generate_backup_script() {
         return
     fi
 
-    # Create a cron expression based on the frequency and backup time
+    # Build the cron expression and the schedule metadata baked into the script.
+    # "schedule" / "schedule_label" let the manager display the real schedule
+    # ( the cron expression alone cannot express a weekday name or "last day" ).
     case "$backup_frequency" in
     daily)
         cron_expression="$cron_minute $cron_hour * * *"
+        schedule="daily"
+        schedule_label="Daily"
         ;;
     weekly)
-        cron_expression="$cron_minute $cron_hour * * 0" # 0 represents Sunday, adjust as needed
+        # Map the chosen weekday name to its cron day-of-week number ( Sunday=0 )
+        local cron_dow
+        case "$backup_day" in
+        Monday) cron_dow=1 ;;
+        Tuesday) cron_dow=2 ;;
+        Wednesday) cron_dow=3 ;;
+        Thursday) cron_dow=4 ;;
+        Friday) cron_dow=5 ;;
+        Saturday) cron_dow=6 ;;
+        Sunday) cron_dow=0 ;;
+        *)
+            clear_screen "force"
+            echo -e "${RED}A valid weekday must be selected for a weekly backup.${RESET}"
+            return
+            ;;
+        esac
+        cron_expression="$cron_minute $cron_hour * * $cron_dow"
+        schedule="weekly"
+        schedule_label="Weekly ($backup_day)"
         ;;
     monthly)
-        cron_expression="$cron_minute $cron_hour 1 * *" # 1 represents first day of the month
+        if [ "$backup_day" == "last" ]; then
+            # "Last day of month" cannot be expressed in cron, so the job runs
+            # daily and the generated script self-restricts to the final day.
+            cron_expression="$cron_minute $cron_hour * * *"
+            schedule="monthly-last"
+            schedule_label="Monthly (last day)"
+        elif [[ "$backup_day" =~ ^[0-9]+$ ]] && [ "$backup_day" -ge 1 ] && [ "$backup_day" -le 28 ]; then
+            cron_expression="$cron_minute $cron_hour $backup_day * *"
+            schedule="monthly"
+            schedule_label="Monthly (day $backup_day)"
+        else
+            clear_screen "force"
+            echo -e "${RED}A valid day of month ( 1-28 or last ) must be selected for a monthly backup.${RESET}"
+            return
+        fi
         ;;
     *)
         # Handle invalid or unsupported frequency here
@@ -583,6 +672,8 @@ type="${remote_backup_type}"
 hash="${script_hash}"
 creation_date="${creation_date}"
 cron_expression="${cron_expression}"
+schedule="${schedule}"
+schedule_label="${schedule_label}"
 domain="${backup_domain}"
 domain_path="${backup_path}"
 retention_period=${retention_period}
@@ -614,6 +705,11 @@ Server time: \$(date)
     fi
 }
 trap backup_failure_notify EXIT
+
+# A "last day of month" schedule runs daily but only acts on the month's final day
+if [ "\${schedule}" = "monthly-last" ] && [ "\$(date -d tomorrow +%d)" != "01" ]; then
+    exit 0
+fi
 
 # --- Serialize backup runs across all sites ( prevents server overload ) ---
 # Acquire a shared lock so that, however many cron entries fire together, the

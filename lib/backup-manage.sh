@@ -58,6 +58,8 @@ manage_automated_backups() {
             local remote_location=$(grep -oP 'remote_backup_location="\K[^"]+' "$script_file")                   # only double quote enclosed values
             local rclone_remote=$(grep -oP 'rclone_remote="\K[^"]+' "$script_file")                              # only double quote enclosed values
             local retention_period=$(grep -oP 'retention_period=("[^"]*"|\S+)' "$script_file" | cut -d '=' -f 2) # Extract value that doesn't have double quotes
+            local schedule=$(grep -oP '(?<!\w)schedule="\K[^"]+' "$script_file")                                  # baked schedule, newer backups only
+            local schedule_label=$(grep -oP 'schedule_label="\K[^"]+' "$script_file")                             # human-readable schedule, newer backups only
 
             # Validate the integrity of this script
             local existing_script_prefix="${script_filename%%_*}"
@@ -73,18 +75,34 @@ manage_automated_backups() {
             # Force base-10 interpretation to avoid octal conversion errors with 08 and 09
             backup_time=$(printf "%02d:%02d" "$((10#$hour))" "$((10#$minute))")
 
-            # Extract backup frequency from cron_expression
-            IFS=" " read -r -a cron_expression_parts <<<"$cron_expression"
-            # Determine the frequency
-            day="${cron_expression_parts[2]}"
-            month="${cron_expression_parts[3]}"
-            day_of_the_week="${cron_expression_parts[4]}"
-            if [[ "$day" = "*" && "$month" = "*" && "$day_of_the_week" = "*" ]]; then
-                backup_frequency="daily"
-            elif [[ "$day" = "*" && "$month" = "*" ]]; then
-                backup_frequency="weekly"
+            # Determine the backup frequency. Newer backups bake in a "schedule"
+            # value; older ones are classified from the cron expression.
+            if [ -n "$schedule" ]; then
+                case "$schedule" in
+                monthly-last) backup_frequency="monthly" ;;
+                *) backup_frequency="$schedule" ;;
+                esac
             else
-                backup_frequency="monthly"
+                # Extract backup frequency from cron_expression
+                IFS=" " read -r -a cron_expression_parts <<<"$cron_expression"
+                # Determine the frequency
+                day="${cron_expression_parts[2]}"
+                month="${cron_expression_parts[3]}"
+                day_of_the_week="${cron_expression_parts[4]}"
+                if [[ "$day" = "*" && "$month" = "*" && "$day_of_the_week" = "*" ]]; then
+                    backup_frequency="daily"
+                elif [[ "$day" = "*" && "$month" = "*" ]]; then
+                    backup_frequency="weekly"
+                else
+                    backup_frequency="monthly"
+                fi
+            fi
+
+            # Prefer the baked human-readable label for display; fall back to the
+            # plain frequency for backups created before schedule metadata existed
+            local display_schedule="$backup_frequency"
+            if [ -n "$schedule_label" ]; then
+                display_schedule="$schedule_label"
             fi
 
             # Store the extracted details in arrays
@@ -94,7 +112,7 @@ manage_automated_backups() {
             backup_cron_expressions+=("$cron_expression")
             backup_hashes+=("$backup_hash")
             backup_names+=("${backup_domain} ${backup_frequency} backup at ${backup_time} to ${rclone_remote}")
-            backup_schedules+=("$backup_frequency")
+            backup_schedules+=("$display_schedule")
             backup_domains+=("$backup_domain")
             backup_paths+=("$backup_path")
             remote_locations+=("$remote_location")
