@@ -34,11 +34,38 @@ sudo bash config.sh
 
 You'll have options to add domains and configure backups. 
 
-The script will guide you through the process. When adding a site, you can let the script auto-discover WordPress installs on the server and pick from a list, or enter the path manually. Then configure your rclone remote(s) and create backups, choosing a type (full site, database-only, or incremental), a schedule (daily, weekly, or monthly), a backup time and a retention period.
+The script will guide you through the process. When adding a site, you can let the script auto-discover WordPress installs on the server and pick from a list, or enter the path manually. Then configure your rclone remote(s) and create backups, choosing a type (full site, database-only, or incremental), a schedule (daily; weekly on a weekday you pick; or monthly on a day you pick, including the last day of the month), a backup time and a retention period. When configuring a backup the script also auto-detects cache and junk folders (caches, `node_modules`, backup-plugin folders, stray logs) and offers to exclude them.
 
 **Note:** the domains and associated paths will be saved to `definitions` file, you can change it later if needed. However, note that changing the file doesn't change any running backups.
 
 That's it, once you've completed all the configuration steps, a cron job will be created to take backups automatically using rclone. Feel free to use the menu again to make as many automated backups as you want.
+
+### Non-interactive ( headless ) usage
+
+Every option can be passed as a flag, so a backup can be created in a single command — handy for scripting many sites at once:
+
+```shell
+sudo bash config.sh \
+  --domain example.com --type full --frequency weekly --day monday \
+  --time 02:00 --retention 30 --remote mydrive --location backups/example
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--domain` | yes | site domain |
+| `--type` | yes | `full`, `incremental` or `database` |
+| `--frequency` | yes | `daily`, `weekly` or `monthly` |
+| `--time` | yes | backup time `HH:MM`, in the server's timezone |
+| `--retention` | yes | days to keep: `3`, `7`, `30`, `90` or `180` |
+| `--remote` | yes | rclone remote name |
+| `--location` | yes | backup location on the remote |
+| `--path` | new sites | WordPress path; required when the domain is not already saved |
+| `--day` | weekly / monthly | weekday (`monday`..`sunday`) or month day (`1`..`28`, or `last`) |
+| `--exclude` | no | comma-separated paths, or `none`; omit to auto-detect cache/junk folders |
+| `--password` | incremental | restic repository password |
+| `--yes` | no | assume yes to confirmations |
+
+After any interactive run, the script prints the equivalent one-line command so you can copy it to reproduce or automate the same backup.
 
 ### Subsequent Use:
 

@@ -382,7 +382,20 @@ generate_backup_script() {
     # Collect backup settings from user
     collect_backup_settings
 
-    # Extract the collected backup settings from the `$backup_settings` array
+    # Generate the backup ( interactive mode ); show the repeat command on success
+    if create_backup_from_settings "interactive"; then
+        print_repeat_hint
+    fi
+}
+
+# Generate the backup script and its cron entry from the BACKUP_* globals.
+# <mode> is "interactive" ( prompts for the rclone remote and confirms the test
+# upload ) or "headless" ( takes the remote from BACKUP_REMOTE and trusts the
+# test exit code ). Returns 0 on success, non-zero on any failure.
+create_backup_from_settings() {
+    local mode="$1"
+
+    # Extract the collected backup settings from the BACKUP_* globals
     local backup_domain="${BACKUP_DOMAIN}"
     local backup_path=""
     local backup_frequency="${BACKUP_FREQUENCY}"
@@ -410,8 +423,8 @@ generate_backup_script() {
     # Validate backup_domain
     if [[ ! " ${DOMAINS[@]} " =~ " $backup_domain " ]]; then
         clear_screen "force"
-        echo -e "${RED}A valid domain must be selected from the available options.${RESET}"
-        return
+        echo -e "${RED}A valid domain must be selected from the available options.${RESET}" >&2
+        return 1
     else
         # If the domain is valid, populate the backup path
         backup_path=$(resolve_domain_path "$backup_domain")
@@ -420,15 +433,15 @@ generate_backup_script() {
     # Validate and sanitize backup_frequency
     if [ -z "$backup_frequency" ] || [[ ! "$backup_frequency" =~ ^(daily|weekly|monthly)$ ]]; then
         clear_screen "force"
-        echo -e "${RED}A valid frequency must be selected from the available options.${RESET}"
-        return
+        echo -e "${RED}A valid frequency must be selected from the available options.${RESET}" >&2
+        return 1
     fi
 
     # Validate backup_time
     if [ -z "$backup_time" ] || [[ ! "$backup_time" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
         clear_screen "force"
-        echo -e "${RED}A valid backup time must selected from the available options.${RESET}"
-        return
+        echo -e "${RED}A valid backup time must selected from the available options.${RESET}" >&2
+        return 1
     else
         # Convert the user-provided time to the appropriate cron format
         IFS=: read -r cron_hour cron_minute <<<"$backup_time"
@@ -437,8 +450,8 @@ generate_backup_script() {
     # Validate retention_period
     if [ -z "$retention_period" ] || [[ ! "$retention_period" =~ ^(3|7|30|90|180)$ ]]; then
         clear_screen "force"
-        echo -e "${RED}A valid retention period must selected from the available options.${RESET}"
-        return
+        echo -e "${RED}A valid retention period must selected from the available options.${RESET}" >&2
+        return 1
     fi
 
     # Build the cron expression and the schedule metadata baked into the script.
@@ -463,8 +476,8 @@ generate_backup_script() {
         Sunday) cron_dow=0 ;;
         *)
             clear_screen "force"
-            echo -e "${RED}A valid weekday must be selected for a weekly backup.${RESET}"
-            return
+            echo -e "${RED}A valid weekday must be selected for a weekly backup.${RESET}" >&2
+            return 1
             ;;
         esac
         cron_expression="$cron_minute $cron_hour * * $cron_dow"
@@ -484,8 +497,8 @@ generate_backup_script() {
             schedule_label="Monthly (day $backup_day)"
         else
             clear_screen "force"
-            echo -e "${RED}A valid day of month ( 1-28 or last ) must be selected for a monthly backup.${RESET}"
-            return
+            echo -e "${RED}A valid day of month ( 1-28 or last ) must be selected for a monthly backup.${RESET}" >&2
+            return 1
         fi
         ;;
     *)
@@ -517,30 +530,44 @@ generate_backup_script() {
         done
     fi
 
-    clear_screen "force"
-    echo -e "${BOLD}${YELLOW}Step 2: ${RESET}${YELLOW}select the rclone's remote you'd like to use for this backup.${RESET}"
-    echo ""
+    # Select the rclone remote. Interactive mode prompts and shows the list;
+    # headless mode takes it from BACKUP_REMOTE and validates it once.
+    if [ "$mode" == "interactive" ]; then
+        clear_screen "force"
+        echo -e "${BOLD}${YELLOW}Step 2: ${RESET}${YELLOW}select the rclone's remote you'd like to use for this backup.${RESET}"
+        echo ""
 
-    # Get comma seperated list of remotes to give to the user as examples
-    local remotes_list=$(sudo rclone listremotes --long | awk -F ':' '{print $1}' | tr '\n' ', ')
-    remotes_list="${remotes_list%,}"
+        # Get comma seperated list of remotes to give to the user as examples
+        local remotes_list=$(sudo rclone listremotes --long | awk -F ':' '{print $1}' | tr '\n' ', ')
+        remotes_list="${remotes_list%,}"
 
-    # Show available remotes
-    echo -e "${BOLD}Available rclone remotes:${RESET}"
-    sudo rclone listremotes --long
+        # Show available remotes
+        echo -e "${BOLD}Available rclone remotes:${RESET}"
+        sudo rclone listremotes --long
 
-    # Use a while loop to make sure the user is prompted again if they made a mistake
-    while true; do
+        # Use a while loop to make sure the user is prompted again if they made a mistake
+        while true; do
 
-        read -p "$(echo -e "${BOLD}${BLUE}Type the name of one of the available remotes as your backup destination (eg; ${remotes_list}): ${RESET}")" rclone_remote_name
+            read -p "$(echo -e "${BOLD}${BLUE}Type the name of one of the available remotes as your backup destination (eg; ${remotes_list}): ${RESET}")" rclone_remote_name
 
-        # Check if the entered remote name exists
-        if rclone listremotes | grep -q "${rclone_remote_name}:"; then
-            break # Remote name is valid, exit the loop
-        else
-            echo -e "${YELLOW}The remote you entered doesn't exist, please try again.${RESET}"
+            # Check if the entered remote name exists
+            if rclone listremotes | grep -q "${rclone_remote_name}:"; then
+                break # Remote name is valid, exit the loop
+            else
+                echo -e "${YELLOW}The remote you entered doesn't exist, please try again.${RESET}"
+            fi
+        done
+    else
+        # Headless: the remote was provided via --remote
+        rclone_remote_name="${BACKUP_REMOTE}"
+        if ! rclone listremotes | grep -q "${rclone_remote_name}:"; then
+            echo "Error: rclone remote '${rclone_remote_name}' does not exist." >&2
+            return 1
         fi
-    done
+    fi
+
+    # Remember the chosen remote so the repeat-command hint can reference it
+    BACKUP_REMOTE="$rclone_remote_name"
 
     # Validate the rclone remote by writing a test file
     while [ $rclone_remote_valid == false ]; do
@@ -551,23 +578,30 @@ generate_backup_script() {
 
         # Confirm the file has been created successfully on remote server
         if [ $exit_code -eq 0 ]; then
-            # Get the rclone remote name that we'll use for the back up with this cron job
-            echo ""
-            echo -e "${GREEN}We have created a test file on your remote location.${RESET}"
-            echo -e "Please go to ${BOLD}"$remote_backup_location"${RESET} on your remote server and check if this file ${BOLD}"wpali.com.txt"${RESET} exists."
-            echo ""
-            read -p "$(echo -e "${BOLD}${BLUE}Do you confirm that the test file has been created succesfully on your remote server? (y/n): ${RESET}")" rclone_remote_push_success
+            if [ "$mode" == "interactive" ]; then
+                # Get the rclone remote name that we'll use for the back up with this cron job
+                echo ""
+                echo -e "${GREEN}We have created a test file on your remote location.${RESET}"
+                echo -e "Please go to ${BOLD}"$remote_backup_location"${RESET} on your remote server and check if this file ${BOLD}"wpali.com.txt"${RESET} exists."
+                echo ""
+                read -p "$(echo -e "${BOLD}${BLUE}Do you confirm that the test file has been created succesfully on your remote server? (y/n): ${RESET}")" rclone_remote_push_success
 
-            if [[ -n "$rclone_remote_push_success" && ("$rclone_remote_push_success" == "y" || "$rclone_remote_push_success" == "yes") ]]; then
-                # Copy was successful
+                if [[ -n "$rclone_remote_push_success" && ("$rclone_remote_push_success" == "y" || "$rclone_remote_push_success" == "yes") ]]; then
+                    # Copy was successful
+                    rclone_remote_valid=true
+                    # Delete leftovers
+                    sudo rm wpali.com.txt
+                    sudo rclone delete "${rclone_remote_name}":"${remote_backup_location}wpali.com.txt"
+                fi
+            else
+                # Headless: the test copy succeeded, trust the exit code without prompting
                 rclone_remote_valid=true
-                # Delete leftovers
                 sudo rm wpali.com.txt
                 sudo rclone delete "${rclone_remote_name}":"${remote_backup_location}wpali.com.txt"
             fi
         else
             # Copy failed, display relevant errors
-            echo -e "${RED}rclone copy failed with exit code $exit_code${RESET}"
+            echo -e "${RED}rclone copy failed with exit code $exit_code${RESET}" >&2
             break
         fi
     done
@@ -589,8 +623,8 @@ generate_backup_script() {
 
         # Check if the file exists
         if [ -e "$script_path" ]; then
-            echo -e "${RED}Duplicate detected, this backup could not be created.${RESET}"
-            return
+            echo -e "${RED}Duplicate detected, this backup could not be created.${RESET}" >&2
+            return 1
         fi
 
         # Initialize restic if this is an incremental backup
@@ -609,16 +643,16 @@ generate_backup_script() {
                 if [ $? -ne 0 ]; then
                     # The restic init command failed, we'll bail out to avoid creating a non-valid backup script
                     clear_screen "force"
-                    echo -e "${RED}Restic repository initilization failed.${RESET}"
+                    echo -e "${RED}Restic repository initilization failed.${RESET}" >&2
                     echo ""
-                    return
+                    return 1
                 fi
             else
                 # If a repository does not exist, restic will return a non-zero exit code
                 clear_screen "force"
-                echo -e "${RED}This incremental backup could not be created. Duplicate found, or other error.${RESET}"
+                echo -e "${RED}This incremental backup could not be created. Duplicate found, or other error.${RESET}" >&2
                 echo ""
-                return
+                return 1
             fi
 
         fi
@@ -1011,25 +1045,62 @@ EOF
             echo "$cron_line" >>"$CRON_FILE"
         fi
         # Show success message
-        clear_screen "force"
-        echo -e "${BOLD}${GREEN}Your automated backup for $backup_domain has been created successfully.${RESET}"
-        echo -e "${GREEN}An initial backup is running the background.${RESET}"
-        echo ""
+        if [ "$mode" == "interactive" ]; then
+            clear_screen "force"
+            echo -e "${BOLD}${GREEN}Your automated backup for $backup_domain has been created successfully.${RESET}"
+            echo -e "${GREEN}An initial backup is running the background.${RESET}"
+            echo ""
+        else
+            echo "Backup created for ${backup_domain} (${remote_backup_type}, ${schedule_label}) -> ${rclone_remote_name}:${remote_backup_location}"
+        fi
         # Update definitions state variables
         update_definitions_state
+        return 0
 
     else
-        # Copy failed, display relevant errors
-        echo -e "${RED}Something went wrong, please make sure the selected rclone remote is correctly configured.${RESET}"
-        echo -e "${RED}Also note that if you're using object based storage, your backup location should start with a bucket name.${RESET}"
-        read -p "$(echo -e "${BLUE}Would you like to open rclone configuration screen? (y/n): ${RESET}")" rclone_reconfig
-        if [ $rclone_reconfig == "y" ] || [ $rclone_reconfig == "yes" ]; then
-            configure_rclone
-            generate_backup_script
-            return
+        if [ "$mode" == "interactive" ]; then
+            # Copy failed, display relevant errors
+            echo -e "${RED}Something went wrong, please make sure the selected rclone remote is correctly configured.${RESET}"
+            echo -e "${RED}Also note that if you're using object based storage, your backup location should start with a bucket name.${RESET}"
+            read -p "$(echo -e "${BLUE}Would you like to open rclone configuration screen? (y/n): ${RESET}")" rclone_reconfig
+            if [ $rclone_reconfig == "y" ] || [ $rclone_reconfig == "yes" ]; then
+                configure_rclone
+                generate_backup_script
+            else
+                generate_backup_script
+            fi
+            return 1
         else
-            generate_backup_script
-            return
+            echo "Error: the rclone remote test failed for '${rclone_remote_name}'." >&2
+            echo "Check that the remote name and backup location are correct." >&2
+            return 1
         fi
     fi
+}
+
+# Print the equivalent non-interactive command for the backup just created, so
+# it can be reproduced or scripted across many sites. Reads the BACKUP_* globals.
+print_repeat_hint() {
+    local hint_path hint_exclude
+    hint_path=$(resolve_domain_path "$BACKUP_DOMAIN")
+    hint_exclude="$EXCLUDED_ITEMS"
+    [ -z "$hint_exclude" ] && hint_exclude="none"
+
+    local hint="  sudo bash \"$SCRIPT_DIR/config.sh\""
+    hint+=" --domain \"$BACKUP_DOMAIN\""
+    hint+=" --path \"$hint_path\""
+    hint+=" --type \"$BACKUP_TYPE\""
+    hint+=" --frequency \"$BACKUP_FREQUENCY\""
+    [ -n "$BACKUP_DAY" ] && hint+=" --day \"$BACKUP_DAY\""
+    hint+=" --time \"$BACKUP_TIME\""
+    hint+=" --retention \"$RETENTION_PERIOD\""
+    hint+=" --remote \"$BACKUP_REMOTE\""
+    hint+=" --location \"$REMOTE_BACKUP_LOCATION\""
+    hint+=" --exclude \"$hint_exclude\""
+    [ "$BACKUP_TYPE" == "incremental" ] && hint+=" --password \"$BACKUP_PASS\""
+    hint+=" --yes"
+
+    echo -e "${BOLD}To create this backup again ( or script it ), run:${RESET}"
+    echo -e "${GREEN}${hint}${RESET}"
+    echo ""
 }

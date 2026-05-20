@@ -52,8 +52,8 @@ source "$SCRIPT_DIR/lib/headless.sh"
 # numbers, etc. ) is read cleanly, without the wrapping markers some terminals add
 printf '\e[?2004l'
 
-# Clear screen
-clear_screen
+# Clear the screen for the interactive menu ( skipped in headless mode )
+[ $# -eq 0 ] && clear_screen
 
 # Check if the definitions file exists
 if [ -f "$DEFINITIONS_FILE" ]; then
@@ -95,7 +95,7 @@ fi
 
 # Check if the user has sudo privileges
 if sudo -n true 2>/dev/null; then
-  echo -e "${GREEN}1. Current user has sudo privileges.${RESET}"
+  [ $# -eq 0 ] && echo -e "${GREEN}1. Current user has sudo privileges.${RESET}"
 else
   echo -e "${RED}1. Current user does not have sudo privileges. This script is only available for sudo users.${RESET}"
   echo ""
@@ -104,7 +104,7 @@ fi
 
 # Check if wp cli is available
 if command -v wp &>/dev/null; then
-  echo -e "${GREEN}2. wp cli is available.${RESET}"
+  [ $# -eq 0 ] && echo -e "${GREEN}2. wp cli is available.${RESET}"
 elif [ -f "/usr/local/bin/wp" ]; then
   echo -e "${YELLOW}2. wp cli found in /usr/local/bin/wp. To make it available system-wide:${RESET}"
   echo -e "${YELLOW}Run: ${RESET}${BOLD}${YELLOW}sudo ln -s /usr/local/bin/wp /usr/bin/wp${RESET}"
@@ -120,7 +120,7 @@ fi
 
 # Check if rclone is available
 if command -v rclone &>/dev/null; then
-  echo -e "${GREEN}3. rclone is available.${RESET}"
+  [ $# -eq 0 ] && echo -e "${GREEN}3. rclone is available.${RESET}"
 elif [ -f "/usr/local/bin/rclone" ]; then
   echo -e "${YELLOW}3. rclone found in /usr/local/bin/rclone. To make it available system-wide:${RESET}"
   echo -e "${YELLOW}Run: ${RESET}${BOLD}${YELLOW}sudo ln -s /usr/local/bin/rclone /usr/bin/rclone${RESET}"
@@ -136,42 +136,51 @@ fi
 
 # Check if restic is available
 if command -v restic &>/dev/null; then
-  echo -e "${GREEN}4. restic is available.${RESET}"
+  [ $# -eq 0 ] && echo -e "${GREEN}4. restic is available.${RESET}"
   RESTIC_AVAILABLE=true
 elif [ -f "/usr/local/bin/restic" ]; then
-  echo -e "${YELLOW}4. restic found in /usr/local/bin/restic. To make it available system-wide:${RESET}"
-  echo -e "${YELLOW}Run: ${RESET}${BOLD}${YELLOW}sudo ln -s /usr/local/bin/restic /usr/bin/restic${RESET}"
+  [ $# -eq 0 ] && echo -e "${YELLOW}4. restic found in /usr/local/bin/restic. To make it available system-wide:${RESET}"
+  [ $# -eq 0 ] && echo -e "${YELLOW}Run: ${RESET}${BOLD}${YELLOW}sudo ln -s /usr/local/bin/restic /usr/bin/restic${RESET}"
   RESTIC_AVAILABLE=false
 else
-  echo -e "${YELLOW}4. restic is not available ( optional for incremental backups ).${RESET}"
+  [ $# -eq 0 ] && echo -e "${YELLOW}4. restic is not available ( optional for incremental backups ).${RESET}"
   RESTIC_AVAILABLE=false
 fi
 
-# Check if automated backups are configured correctly
-if [ $HAS_AUTOMATED_BACKUPS == true ]; then
+# Show the system-check summary banner ( interactive mode only )
+if [ $# -eq 0 ]; then
+  if [ $HAS_AUTOMATED_BACKUPS == true ]; then
 
-  echo -e "${GREEN}5. Automated backups has been configured.${RESET}"
+    echo -e "${GREEN}5. Automated backups has been configured.${RESET}"
 
-  echo ""
-  echo -e "${GREEN_BG}---------------------------------------------------------------------------${RESET}"
-  echo -e "${GREEN_BG}-------------------- ALL CHECKS COMPLETED SUCCESSFULLY --------------------${RESET}"
-  echo -e "${GREEN_BG}------------------------ MANAGE YOUR BACKUPS BELOW ------------------------${RESET}"
-  echo -e "${GREEN_BG}---------------------------------------------------------------------------${RESET}"
+    echo ""
+    echo -e "${GREEN_BG}---------------------------------------------------------------------------${RESET}"
+    echo -e "${GREEN_BG}-------------------- ALL CHECKS COMPLETED SUCCESSFULLY --------------------${RESET}"
+    echo -e "${GREEN_BG}------------------------ MANAGE YOUR BACKUPS BELOW ------------------------${RESET}"
+    echo -e "${GREEN_BG}---------------------------------------------------------------------------${RESET}"
 
-else
-  echo -e "${YELLOW}5. Automated backups has not been configured.${RESET}"
+  else
+    echo -e "${YELLOW}5. Automated backups has not been configured.${RESET}"
 
-  echo ""
-  echo -e "${GREEN_BG}---------------------------------------------------------------------------${RESET}"
-  echo -e "${GREEN_BG}------------------- SYSTEM CHECKS COMPLETED SUCCESSFULLY ------------------${RESET}"
-  echo -e "${GREEN_BG}------------------ CONFIGURE YOUR AUTOMATED BACKUPS BELOW -----------------${RESET}"
-  echo -e "${GREEN_BG}---------------------------------------------------------------------------${RESET}"
+    echo ""
+    echo -e "${GREEN_BG}---------------------------------------------------------------------------${RESET}"
+    echo -e "${GREEN_BG}------------------- SYSTEM CHECKS COMPLETED SUCCESSFULLY ------------------${RESET}"
+    echo -e "${GREEN_BG}------------------ CONFIGURE YOUR AUTOMATED BACKUPS BELOW -----------------${RESET}"
+    echo -e "${GREEN_BG}---------------------------------------------------------------------------${RESET}"
 
+  fi
 fi
 
 ####################################################################################################
 ################################# OUTPUT THE CONFIGURATION OPTIONS #################################
 ####################################################################################################
+
+# Headless / non-interactive mode: when arguments are passed, create a single
+# backup straight from CLI flags and exit without showing the interactive menu.
+if [ $# -gt 0 ]; then
+  run_headless "$@"
+  exit $?
+fi
 
 while true; do
   # Reset the "clear_screen_last_caller_name" function each time the main menu is generated:
