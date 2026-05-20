@@ -18,7 +18,9 @@ clear_screen() {
 
     # If "force" is specified, clear the screen regardless of the last caller, otherwise, don't clear twice for same caller
     if [[ "$1" = "force" || "$caller_name" != "$clear_screen_last_caller_name" ]]; then
-        echo -e "\e[2J\e[H"
+        # \e[3J erases the scrollback buffer, \e[2J the visible screen, \e[H homes
+        # the cursor — together they give a true refresh with no scroll-up history.
+        echo -e "\e[3J\e[H\e[2J"
         clear_screen_last_caller_name="$caller_name"
     fi
 }
