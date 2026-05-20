@@ -30,8 +30,20 @@ BLUE="\e[34m"
 BLUE_BG="\e[44m"
 RESET="\e[0m" # Reset text formatting
 
-# Load the functions file
-source functions.sh
+# Resolve the directory this script lives in, so the lib/ modules load regardless
+# of the current working directory.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Load the function modules
+source "$SCRIPT_DIR/lib/ui.sh"
+source "$SCRIPT_DIR/lib/definitions.sh"
+source "$SCRIPT_DIR/lib/domains.sh"
+source "$SCRIPT_DIR/lib/rclone.sh"
+source "$SCRIPT_DIR/lib/backup-create.sh"
+source "$SCRIPT_DIR/lib/backup-manage.sh"
+source "$SCRIPT_DIR/lib/notifications.sh"
+source "$SCRIPT_DIR/lib/menu.sh"
+source "$SCRIPT_DIR/lib/headless.sh"
 
 # Disable terminal bracketed-paste mode so pasted input ( file paths, lists of
 # numbers, etc. ) is read cleanly, without the wrapping markers some terminals add
