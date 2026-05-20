@@ -21,6 +21,9 @@ CRON_FILE="/etc/cron.d/rclone-automated-backups-by-alikhallad"
 # Shared lock file: every generated backup script grabs this lock so that, no
 # matter how many cron entries fire at once, backups run strictly one-at-a-time.
 LOCK_FILE="/tmp/rclone-automated-backups-by-alikhallad.lock"
+# How long ( seconds ) a queued backup waits for the shared lock before giving
+# up for this cycle. 18h is long enough for a full nightly queue to drain.
+LOCK_TIMEOUT=64800
 # Define ANSI color codes
 BOLD="\033[1m"
 UNDERLINE="\033[4m"

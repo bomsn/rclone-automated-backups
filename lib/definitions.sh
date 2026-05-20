@@ -70,3 +70,35 @@ update_definitions_state() {
         ARE_DOMAINS_EMPTY=-1
     fi
 }
+
+# Add a new domain + path to the definitions under an exclusive lock, re-reading
+# the on-disk file first. This lets several headless runs each add a different
+# site at the same time without losing one another's writes.
+persist_new_domain() {
+    local new_domain="$1"
+    local new_path="$2"
+    local lock_file="/tmp/rclone-automated-backups-by-alikhallad-definitions.lock"
+    local i exists=false
+
+    exec 9>"$lock_file"
+    flock 9
+
+    # Re-read the freshest on-disk state ( a concurrent run may have added sites )
+    [ -f "$DEFINITIONS_FILE" ] && source "$DEFINITIONS_FILE"
+
+    # Append the domain only if it is still absent
+    for ((i = 0; i < ${#DOMAINS[@]}; i++)); do
+        if [ "${DOMAINS[$i]}" == "$new_domain" ]; then
+            exists=true
+            break
+        fi
+    done
+    if [ "$exists" == false ]; then
+        DOMAINS+=("$new_domain")
+        PATHS+=("$new_path")
+    fi
+    update_definitions
+
+    flock -u 9
+    exec 9>&-
+}

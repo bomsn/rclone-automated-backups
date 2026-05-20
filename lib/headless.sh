@@ -44,6 +44,10 @@ run_headless() {
     while [ $# -gt 0 ]; do
         flag="$1"
         case "$flag" in
+        --help | -h)
+            headless_usage
+            return 0
+            ;;
         --yes)
             ASSUME_YES=true
             shift
@@ -182,7 +186,13 @@ run_headless() {
             return 2
         fi
     else
-        # New domain: --path is required and must hold a WordPress install
+        # New domain: validate the name format, the same as the interactive add
+        local domain_pattern="^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"
+        if [[ ! "$BACKUP_DOMAIN" =~ $domain_pattern ]]; then
+            headless_usage "'$BACKUP_DOMAIN' is not a valid domain name"
+            return 2
+        fi
+        # --path is required for a new domain and must hold a WordPress install
         if [ -z "$hl_path" ]; then
             headless_usage "--path is required for the new domain '$BACKUP_DOMAIN'"
             return 2
@@ -197,9 +207,8 @@ run_headless() {
             headless_usage "no WordPress installation found under '$hl_path'"
             return 2
         fi
-        DOMAINS+=("$BACKUP_DOMAIN")
-        PATHS+=("$resolved")
-        update_definitions
+        # Persist under a lock so concurrent headless runs cannot lose each other
+        persist_new_domain "$BACKUP_DOMAIN" "$resolved"
     fi
 
     # --- excludes: explicit list, "none", or auto-detect when omitted ---
@@ -221,6 +230,11 @@ run_headless() {
                 EXCLUDED_ITEMS="$EXCLUDED_ITEMS, $detected"
             fi
         done < <(detect_excludes "$site_path")
+    fi
+
+    # Excludes have no effect on a database-only backup ( only the DB is saved )
+    if [ "$BACKUP_TYPE" == "database" ] && [ "$hl_exclude_set" == true ] && [ -n "$EXCLUDED_ITEMS" ]; then
+        echo "Note: --exclude is ignored for --type database ( only the database is backed up )." >&2
     fi
 
     # All settings resolved - hand off to the shared generation core

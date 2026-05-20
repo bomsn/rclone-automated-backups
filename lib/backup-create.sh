@@ -410,10 +410,8 @@ create_backup_from_settings() {
     local restic_password=""
     local rclone_remote_name=""
     local rclone_remote_valid=false
-    # Lock wait timeout baked into the generated script: 18h is long enough that
-    # the last site in a long nightly queue still gets its turn, while a lock
-    # stuck beyond 18h is bypassed before the next night's run.
-    local lock_timeout=64800
+    # Lock wait timeout baked into the generated script ( see LOCK_TIMEOUT )
+    local lock_timeout="${LOCK_TIMEOUT}"
 
     # Pull restic password if an incremental backup is defined
     if [ $remote_backup_type == "incremental" ]; then
@@ -594,10 +592,18 @@ create_backup_from_settings() {
                     sudo rclone delete "${rclone_remote_name}":"${remote_backup_location}wpali.com.txt"
                 fi
             else
-                # Headless: the test copy succeeded, trust the exit code without prompting
-                rclone_remote_valid=true
-                sudo rm wpali.com.txt
-                sudo rclone delete "${rclone_remote_name}":"${remote_backup_location}wpali.com.txt"
+                # Headless: confirm the test file actually appears on the remote
+                # ( the automated equivalent of the interactive y/n confirmation -
+                # catches a misconfigured bucket/path that rclone copy still exits 0 on )
+                if sudo rclone lsf "${rclone_remote_name}":"${remote_backup_location}" 2>/dev/null | grep -qx "wpali.com.txt"; then
+                    rclone_remote_valid=true
+                    sudo rm wpali.com.txt
+                    sudo rclone delete "${rclone_remote_name}":"${remote_backup_location}wpali.com.txt"
+                else
+                    echo "Error: the rclone test file did not appear at '${rclone_remote_name}:${remote_backup_location}'." >&2
+                    sudo rm wpali.com.txt
+                    break
+                fi
             fi
         else
             # Copy failed, display relevant errors
@@ -751,9 +757,15 @@ fi
 # Acquire a shared lock so that, however many cron entries fire together, the
 # heavy work ( tar / rclone / restic ) runs strictly one site at a time.
 exec {lock_fd}>"$LOCK_FILE"
-if ! flock -w $lock_timeout "\${lock_fd}"; then
-    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP SKIPPED (\${type}): lock busy, timed out for '\${domain}'" >> "$LOG_FILE"
-    exit 0
+if ! flock -n "\${lock_fd}"; then
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP QUEUED (\${type}): waiting for another backup to finish for '\${domain}'" >> "$LOG_FILE"
+    if ! flock -w $lock_timeout "\${lock_fd}"; then
+        echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP SKIPPED (\${type}): lock busy, timed out for '\${domain}'" >> "$LOG_FILE"
+        # A pre-restore backup that cannot run must fail so the caller aborts the
+        # restore; a scheduled run just skips this cycle without an alert.
+        [ "\${call_type}" = "restore" ] && exit 1
+        exit 0
+    fi
 fi
 
 echo "[\${timestamp}] BACK UP STARTED (\${type}): Performing $backup_time $backup_frequency backup for '\${domain}'" >> "$LOG_FILE"
@@ -1099,10 +1111,13 @@ print_repeat_hint() {
     hint+=" --remote \"$BACKUP_REMOTE\""
     hint+=" --location \"$REMOTE_BACKUP_LOCATION\""
     hint+=" --exclude \"$hint_exclude\""
-    [ "$BACKUP_TYPE" == "incremental" ] && hint+=" --password \"$BACKUP_PASS\""
+    # Emit a placeholder rather than the real restic password, so copying this
+    # command into a script or shell history does not leak the secret.
+    [ "$BACKUP_TYPE" == "incremental" ] && hint+=" --password \"<your-restic-password>\""
     hint+=" --yes"
 
     echo -e "${BOLD}To create this backup again ( or script it ), run:${RESET}"
     echo -e "${GREEN}${hint}${RESET}"
+    [ "$BACKUP_TYPE" == "incremental" ] && echo -e "${YELLOW}Replace <your-restic-password> with the password you set for this backup.${RESET}"
     echo ""
 }
