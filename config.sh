@@ -49,8 +49,9 @@ source "$SCRIPT_DIR/lib/menu.sh"
 source "$SCRIPT_DIR/lib/headless.sh"
 
 # Disable terminal bracketed-paste mode so pasted input ( file paths, lists of
-# numbers, etc. ) is read cleanly, without the wrapping markers some terminals add
-printf '\e[?2004l'
+# numbers, etc. ) is read cleanly, without the wrapping markers some terminals
+# add. Interactive only - skipped in headless mode to keep its output clean.
+[ $# -eq 0 ] && printf '\e[?2004l'
 
 # Clear the screen for the interactive menu ( skipped in headless mode )
 [ $# -eq 0 ] && clear_screen
