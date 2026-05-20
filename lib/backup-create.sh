@@ -740,8 +740,10 @@ Server time: \$(date)
 }
 trap backup_failure_notify EXIT
 
-# A "last day of month" schedule runs daily but only acts on the month's final day
-if [ "\${schedule}" = "monthly-last" ] && [ "\$(date -d tomorrow +%d)" != "01" ]; then
+# A "last day of month" schedule runs daily but only acts on the month's final
+# day. Only scheduled cron runs ( call_type=backup ) are skipped - the initial
+# backup and a pre-restore backup must always run, whatever the day.
+if [ "\${call_type}" = "backup" ] && [ "\${schedule}" = "monthly-last" ] && [ "\$(date -d tomorrow +%d)" != "01" ]; then
     exit 0
 fi
 
@@ -1031,7 +1033,7 @@ EOF
         # Give the script the right permissions ( only owner can read/write/execute )
         sudo chmod 700 "$script_path"
         # Run the script to take the initial backup in the background
-        sudo -b bash "$script_path" >/dev/null 2>&1
+        sudo -b bash "$script_path" "initial" >/dev/null 2>&1
         # Create our cron file if it doesn't already exist, and give it correct permissions
         if [ ! -f "$CRON_FILE" ]; then
             sudo touch "$CRON_FILE"     # Create the cron file
