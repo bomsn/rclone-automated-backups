@@ -430,6 +430,8 @@ create_backup_from_settings() {
     local rclone_remote_valid=false
     # Lock wait timeout baked into the generated script ( see LOCK_TIMEOUT )
     local lock_timeout="${LOCK_TIMEOUT}"
+    # wp-cli phar path, baked in; the script re-resolves PHP itself at run time
+    local wp_cli_path="${WP_CLI_PATH}"
 
     # Pull restic password if an incremental backup is defined
     if [ $remote_backup_type == "incremental" ]; then
@@ -740,6 +742,16 @@ remote_backup_location="${remote_backup_location}"
 timestamp=\$(date +'%Y-%m-%d %H:%M:%S')
 backup_date=\$(date +'%d-%m-%Y_%H-%M')
 
+# Resolve how to run wp-cli. PHP is on PATH on standard hosts; Plesk keeps it
+# under /opt/plesk/php/<version>/bin. Re-checked here on every run so a PHP
+# path change can never silently break the backup.
+wp_cli="${wp_cli_path}"
+if command -v php >/dev/null 2>&1; then
+    wp_run="\${wp_cli}"
+else
+    wp_run="\$(ls -d /opt/plesk/php/*/bin/php 2>/dev/null | sort -Vr | head -1) \${wp_cli}"
+fi
+
 # Email a failure alert if this backup exits with an error ( one alert per failed run ).
 # The address is read from the definitions file at run time, so it can be changed centrally.
 definitions_file="$PWD/$DEFINITIONS_FILE"
@@ -800,10 +812,10 @@ wp_owner=\$(sudo stat -c "%U" \${domain_path})
 
 # Get the database name and construct the db backup file name and path
 # Note that we are using sudo to run wp cli commands as "wp_owner" to avoid permissions complications
-db_name=\$(sudo -u "\${wp_owner}" -s -- wp config get DB_NAME --path="\${domain_path}")
+db_name=\$(sudo -u "\${wp_owner}" -s -- \${wp_run} config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
 db_filename=\${hash}_\${domain//./_}_\${db_name}_incremental.sql
 # We'll export the database and move it to our current directory as a 'tmp' file
-if ! sudo -u "\${wp_owner}" -s -- wp db export "\${domain_path}/\${db_filename}" --path="\${domain_path}"; then
+if ! sudo -u "\${wp_owner}" -s -- \${wp_run} db export "\${domain_path}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
     echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >>"$LOG_FILE"
     sudo rm -f "\${domain_path}/\${db_filename}"
     exit 1
@@ -863,11 +875,11 @@ if [ ! -d "\${wp_owner_directory}" ]; then
 fi
 
 # Get the database name and construct the db backup file name and path
-db_name=\$(sudo -u "\${wp_owner}" -s -- wp config get DB_NAME --path="\${domain_path}")
+db_name=\$(sudo -u "\${wp_owner}" -s -- \${wp_run} config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
 db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
 
 # Export the database with proper permissions
-if ! sudo -u "\${wp_owner}" -s -- wp db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}"; then
+if ! sudo -u "\${wp_owner}" -s -- \${wp_run} db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
     echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
     sudo rm -f "\${wp_owner_directory}/\${db_filename}"
     exit 1
@@ -932,11 +944,11 @@ if [[ "\${domain_path}" == */htdocs ]]; then
 fi
 
 # Get the database name and construct the db backup file name and path
-db_name=\$(sudo -u "\${wp_owner}" -s -- wp config get DB_NAME --path="\${domain_path}")
+db_name=\$(sudo -u "\${wp_owner}" -s -- \${wp_run} config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
 db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
 
 # Export the database with proper permissions
-if ! sudo -u "\${wp_owner}" -s -- wp db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}"; then
+if ! sudo -u "\${wp_owner}" -s -- \${wp_run} db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
     echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
     sudo rm -f "\${wp_owner_directory}/\${db_filename}"
     exit 1

@@ -638,7 +638,7 @@ manage_automated_backups() {
                 # Now import the database using wp cli and delete it afterwards
                 local wp_owner=$(sudo stat -c "%U" ${selected_backup_path})                                                # get WordPress folder owner
                 local sql_file=$(find "$selected_backup_path" -type f -name "*${selected_backup_hash}_*.sql" -print -quit) # find the sql file path
-                sudo -u "${wp_owner}" -i -- wp db import "${sql_file}" --path="${selected_backup_path}"                    # import db
+                sudo -u "${wp_owner}" -s -- $WP_RUN db import "${sql_file}" --path="${selected_backup_path}" --skip-plugins --skip-themes  # import db
                 sudo rm "${sql_file}"                                                                                      # Delete the SQL file after it's been imported
 
                 clear_screen "force"

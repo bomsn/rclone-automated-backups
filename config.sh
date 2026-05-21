@@ -108,6 +108,7 @@ fi
 
 # Check if wp cli is available
 if command -v wp &>/dev/null; then
+  WP_CLI_PATH="$(command -v wp)"
   [ $# -eq 0 ] && echo -e "${GREEN}2. wp cli is available.${RESET}"
 elif [ -f "/usr/local/bin/wp" ]; then
   echo -e "${YELLOW}2. wp cli found in /usr/local/bin/wp. To make it available system-wide:${RESET}"
@@ -121,6 +122,27 @@ else
   echo ""
   exit 1
 fi
+
+# Resolve how to run wp-cli. The `wp` phar needs a PHP binary: `php` is on PATH
+# on standard servers, but Plesk isolates PHP under /opt/plesk/php/<v>/bin/php.
+# WP_RUN is the working invocation used by the tool; the generated backup
+# scripts bake WP_CLI_PATH and re-resolve PHP themselves at run time.
+if command -v php &>/dev/null; then
+  WP_RUN="$WP_CLI_PATH"
+else
+  WP_PHP_BIN=""
+  for php_candidate in $(ls -d /opt/plesk/php/*/bin/php 2>/dev/null | sort -Vr); do
+    [ -x "$php_candidate" ] && { WP_PHP_BIN="$php_candidate"; break; }
+  done
+  WP_RUN="$WP_PHP_BIN $WP_CLI_PATH"
+fi
+if ! $WP_RUN cli version --allow-root &>/dev/null; then
+  echo -e "${RED}2b. wp-cli could not run — it needs PHP. Install php-cli, or on${RESET}"
+  echo -e "${RED}    Plesk make sure /opt/plesk/php/*/bin/php exists.${RESET}"
+  echo ""
+  exit 1
+fi
+[ $# -eq 0 ] && echo -e "${GREEN}2b. wp-cli runs ( ${WP_RUN} ).${RESET}"
 
 # Check if rclone is available
 if command -v rclone &>/dev/null; then

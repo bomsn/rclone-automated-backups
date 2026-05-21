@@ -1,2 +1,37 @@
 .git*
 todo.txt
+
+# ==============================================================================
+# AI Agents, LLM Helpers, and Coding Copilots
+# ==============================================================================
+
+# Claude & Claude Code CLI
+.claude/
+.claudeignore
+*.claude.md
+!CLAUDE.md
+
+# OpenAI Codex & Custom Agents
+.codex/
+agents.mmd
+.ai-context/
+
+# Cursor Editor
+.cursor/
+.cursorignore
+.cursorrules.local
+
+# Cline & Roo Cline
+.cline/
+.clineignore
+.roo/
+
+# Aider AI
+.aider*
+.aider.tags.cache.v3
+
+# General AI Scratchpads, Logs, and Tasks
+todo.txt
+ai_todo.md
+.ai_history/
+llm_output.log
