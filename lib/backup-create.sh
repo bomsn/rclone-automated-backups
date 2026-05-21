@@ -850,7 +850,7 @@ EOF
 wp_owner=\$(sudo stat -c "%U" \${domain_path})
 
 # Use a dedicated temp directory for database backups
-wp_owner_directory="/tmp/wp_db_backup"
+wp_owner_directory="/tmp/wp_db_backup_\${hash}"
 
 echo "[\${timestamp}] - WP folder owner found: '\${wp_owner}'" >> "$LOG_FILE"
 echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "$LOG_FILE"
@@ -858,7 +858,7 @@ echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "$LOG
 # Create tmp directory with proper permissions if it doesn't exist
 if [ ! -d "\${wp_owner_directory}" ]; then
     sudo mkdir -p "\${wp_owner_directory}"
-    sudo chown \${wp_owner}:\${wp_owner} "\${wp_owner_directory}"
+    sudo chown \${wp_owner} "\${wp_owner_directory}"
     sudo chmod 755 "\${wp_owner_directory}"
 fi
 
@@ -913,7 +913,7 @@ EOF
 wp_owner=\$(sudo stat -c "%U" \${domain_path})
 
 # Use a dedicated temp directory for database backups
-wp_owner_directory="/tmp/wp_db_backup"
+wp_owner_directory="/tmp/wp_db_backup_\${hash}"
 
 echo "[\${timestamp}] - WP folder owner found: '\${wp_owner}'" >> "$LOG_FILE"
 echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "$LOG_FILE"
@@ -921,7 +921,7 @@ echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "$LOG
 # Create tmp directory with proper permissions if it doesn't exist
 if [ ! -d "\${wp_owner_directory}" ]; then
     sudo mkdir -p "\${wp_owner_directory}"
-    sudo chown \${wp_owner}:\${wp_owner} "\${wp_owner_directory}"
+    sudo chown \${wp_owner} "\${wp_owner_directory}"
     sudo chmod 755 "\${wp_owner_directory}"
 fi
 
