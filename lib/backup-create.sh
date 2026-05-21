@@ -163,6 +163,64 @@ collect_backup_settings() {
     done
     PS3="$original_ps3" # Restore the original PS3 value
 
+    # Collect backup type early. A database-only backup never touches site
+    # files, so choosing it here lets the file-exclude step be skipped.
+    # full        = whole site files + database in one archive
+    # incremental = restic-based snapshots of the whole site ( requires restic )
+    # database    = database-only backup ( lightweight, ideal for a daily schedule )
+    PS3="$(echo -e "${BOLD}${BLUE}Choose backup type: ${RESET}")"
+    if [ $RESTIC_AVAILABLE == true ]; then
+        select type in "full" "incremental" "database"; do
+            case $type in
+            full | incremental | database)
+                BACKUP_TYPE="$type"
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid option. Please select a valid type.${RESET}"
+                ;;
+            esac
+        done
+    else
+        select type in "full" "database"; do
+            case $type in
+            full | database)
+                BACKUP_TYPE="$type"
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid option. Please select a valid type.${RESET}"
+                ;;
+            esac
+        done
+    fi
+    PS3="$original_ps3" # Restore the original PS3 value
+
+    # Collect restic password
+    if [ $BACKUP_TYPE == "incremental" ]; then
+        echo ""
+        echo -e "${YELLOW}A password is required for incremental backups.${RESET}"
+        echo -e "${BOLD}${YELLOW}Note 1:${RESET} ${YELLOW}The password is required by restic to take and restore backups.${RESET}"
+        echo -e "${BOLD}${YELLOW}Note 2:${RESET} ${YELLOW}The Password will be saved in plain-text inside the backup script for automation.${RESET}"
+        echo -e "${BOLD}${YELLOW}Note 3:${RESET} ${YELLOW}If the backup script is deleted, the password record will be lost.${RESET}"
+        echo -e "${BOLD}${YELLOW}Note 4:${RESET} ${YELLOW}Make sure to remember your password, if it's lost/forgotten, the incremental backups cannot be restored anywhere.${RESET}"
+        echo ""
+
+        while true; do
+
+            read -s -p "$(echo -e "${BOLD}${BLUE}Enter your password: ${RESET}")" BACKUP_PASS
+            echo ""
+            read -s -p "$(echo -e "${BOLD}${BLUE}Confirm your password: ${RESET}")" BACKUP_CONFIRM_PASS
+            echo ""
+
+            if [ "$BACKUP_PASS" == "$BACKUP_CONFIRM_PASS" ]; then
+                break
+            else
+                echo -e "${RED}Passwords do not match. Please try again.${RESET}"
+            fi
+        done
+    fi
+
     # Collect frequency preference
     PS3="$(echo -e "${BOLD}${BLUE}Choose backup frequency: ${RESET}")"
     select frequency in "daily" "weekly" "monthly" "none"; do
@@ -264,64 +322,12 @@ collect_backup_settings() {
     done
     PS3="$original_ps3" # Restore the original PS3 value
 
-    # Collect excluded folders ( auto-detect cache / junk, then free-text extras )
-    review_detected_excludes "$(resolve_domain_path "$BACKUP_DOMAIN")"
-
-    # Collect backup type
-    # full      = whole site files + database in one archive
-    # incremental = restic-based snapshots of the whole site ( requires restic )
-    # database  = database-only backup ( lightweight, ideal for a daily schedule )
-    PS3="$(echo -e "${BOLD}${BLUE}Choose backup type: ${RESET}")"
-    if [ $RESTIC_AVAILABLE == true ]; then
-        select type in "full" "incremental" "database"; do
-            case $type in
-            full | incremental | database)
-                BACKUP_TYPE="$type"
-                break
-                ;;
-            *)
-                echo -e "${RED}Invalid option. Please select a valid type.${RESET}"
-                ;;
-            esac
-        done
+    # Collect excluded folders ( auto-detect cache / junk, then free-text extras ).
+    # A database-only backup never touches site files, so the step is skipped.
+    if [ "$BACKUP_TYPE" == "database" ]; then
+        EXCLUDED_ITEMS=""
     else
-        select type in "full" "database"; do
-            case $type in
-            full | database)
-                BACKUP_TYPE="$type"
-                break
-                ;;
-            *)
-                echo -e "${RED}Invalid option. Please select a valid type.${RESET}"
-                ;;
-            esac
-        done
-    fi
-    PS3="$original_ps3" # Restore the original PS3 value
-
-    # Collect restic password
-    if [ $BACKUP_TYPE == "incremental" ]; then
-        echo ""
-        echo -e "${YELLOW}A password is required for incremental backups.${RESET}"
-        echo -e "${BOLD}${YELLOW}Note 1:${RESET} ${YELLOW}The password is required by restic to take and restore backups.${RESET}"
-        echo -e "${BOLD}${YELLOW}Note 2:${RESET} ${YELLOW}The Password will be saved in plain-text inside the backup script for automation.${RESET}"
-        echo -e "${BOLD}${YELLOW}Note 3:${RESET} ${YELLOW}If the backup script is deleted, the password record will be lost.${RESET}"
-        echo -e "${BOLD}${YELLOW}Note 4:${RESET} ${YELLOW}Make sure to remember your password, if it's lost/forgotten, the incremental backups cannot be restored anywhere.${RESET}"
-        echo ""
-
-        while true; do
-
-            read -s -p "$(echo -e "${BOLD}${BLUE}Enter your password: ${RESET}")" BACKUP_PASS
-            echo ""
-            read -s -p "$(echo -e "${BOLD}${BLUE}Confirm your password: ${RESET}")" BACKUP_CONFIRM_PASS
-            echo ""
-
-            if [ "$BACKUP_PASS" == "$BACKUP_CONFIRM_PASS" ]; then
-                break
-            else
-                echo -e "${RED}Passwords do not match. Please try again.${RESET}"
-            fi
-        done
+        review_detected_excludes "$(resolve_domain_path "$BACKUP_DOMAIN")"
     fi
 
     # Collect the destination folder path
@@ -347,6 +353,7 @@ collect_backup_settings() {
     echo ""
     echo -e "${YELLOW}Your current backup configurations:${RESET}"
     echo -e "${BOLD}Backup Site:${RESET} $BACKUP_DOMAIN"
+    echo -e "${BOLD}Backup Type:${RESET} $BACKUP_TYPE"
     if [ -n "$BACKUP_DAY" ]; then
         echo -e "${BOLD}Backup Frequency:${RESET} $BACKUP_FREQUENCY ( $BACKUP_DAY )"
     else
@@ -354,9 +361,10 @@ collect_backup_settings() {
     fi
     echo -e "${BOLD}Backup Time:${RESET} $BACKUP_TIME"
     echo -e "${BOLD}Retention Period:${RESET} $RETENTION_PERIOD days"
-    echo -e "${BOLD}Excluded Locations:${RESET} $EXCLUDED_ITEMS"
+    if [ "$BACKUP_TYPE" != "database" ]; then
+        echo -e "${BOLD}Excluded Locations:${RESET} $EXCLUDED_ITEMS"
+    fi
     echo -e "${BOLD}Remote Backup Location:${RESET} $REMOTE_BACKUP_LOCATION"
-    echo -e "${BOLD}Remote Backup Type:${RESET} $BACKUP_TYPE"
 
     read -p "$(echo -e "${BOLD}${BLUE}Are you sure you want to proceed with the above configurations? (y/n): ${RESET}")" confirm
     if [[ $confirm != "y" && $confirm != "yes" ]]; then
