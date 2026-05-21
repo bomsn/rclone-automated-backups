@@ -1062,9 +1062,9 @@ EOF
 
         # Give the script the right permissions ( only owner can read/write/execute )
         sudo chmod 700 "$script_path"
-        # Run the script to take the initial backup in the background
-        sudo -b bash "$script_path" "initial" >/dev/null 2>&1
-        # Create our cron file if it doesn't already exist, and give it correct permissions
+
+        # Register the cron schedule ( the durable part - do this before the
+        # first backup, which can take a while ).
         if [ ! -f "$CRON_FILE" ]; then
             sudo touch "$CRON_FILE"     # Create the cron file
             sudo chmod 644 "$CRON_FILE" # Ensure the file has the correct permissions
@@ -1076,17 +1076,43 @@ EOF
         else
             echo "$cron_line" >>"$CRON_FILE"
         fi
+
         # Show success message
         if [ "$mode" == "interactive" ]; then
             clear_screen "force"
             echo -e "${BOLD}${GREEN}Your automated backup for $backup_domain has been created successfully.${RESET}"
-            echo -e "${GREEN}An initial backup is running the background.${RESET}"
             echo ""
         else
             echo "Backup created for ${backup_domain} (${remote_backup_type}, ${schedule_label}) -> ${rclone_remote_name}:${remote_backup_location}"
         fi
         # Update definitions state variables
         update_definitions_state
+
+        # Decide whether to take the first backup right now. Interactive mode
+        # asks; headless runs it unless --no-initial was passed.
+        local run_initial=false
+        if [ "$mode" == "interactive" ]; then
+            local first_now
+            read -p "$(echo -e "${BOLD}${BLUE}Run the first backup now? (y/n): ${RESET}")" first_now
+            [[ "${first_now,,}" == "y" || "${first_now,,}" == "yes" ]] && run_initial=true
+        elif [ "$SKIP_INITIAL" != true ]; then
+            run_initial=true
+        fi
+
+        if [ "$run_initial" == true ]; then
+            # Run it in the foreground so the result is visible and confirmed.
+            # The backup script logs its detail to "$LOG_FILE"; here we only
+            # report whether it succeeded.
+            echo -e "${YELLOW}Running the first backup now ( this can take a while )...${RESET}"
+            if sudo bash "$script_path" "initial"; then
+                echo -e "${GREEN}First backup completed. Backups will continue on the schedule.${RESET}"
+            else
+                echo -e "${RED}First backup FAILED - check the log: $LOG_FILE${RESET}" >&2
+            fi
+        else
+            echo -e "${YELLOW}Skipped the first backup; the schedule will take it ( $backup_time, $schedule_label ).${RESET}"
+        fi
+        echo ""
         return 0
 
     else

@@ -63,9 +63,10 @@ sudo bash config.sh \
 | `--day` | weekly / monthly | weekday (`monday`..`sunday`) or month day (`1`..`28`, or `last`) |
 | `--exclude` | no | comma-separated paths, or `none`; omit to auto-detect cache/junk folders |
 | `--password` | incremental | restic repository password |
+| `--no-initial` | no | skip the immediate first backup; let the schedule take it ( default: run the first backup right away ) |
 | `--yes` | no | assume yes to confirmations |
 
-After any interactive run, the script prints the equivalent one-line command so you can copy it to reproduce or automate the same backup.
+By default the first backup runs immediately ( in the foreground, so you see whether it succeeded ); the cron schedule takes every backup after that. After any interactive run, the script prints the equivalent one-line command so you can copy it to reproduce or automate the same backup.
 
 ### Subsequent Use:
 

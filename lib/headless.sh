@@ -26,6 +26,8 @@ Conditional / optional:
   --exclude    <list>     comma-separated paths, or "none"; omit to
                           auto-detect cache / junk folders
   --password   <pass>     required for --type incremental
+  --no-initial            don't run the first backup now; let the schedule
+                          take it ( default: run the first backup immediately )
   --yes                   assume yes to confirmations
 USAGE
 }
@@ -36,7 +38,7 @@ USAGE
 run_headless() {
     BACKUP_DOMAIN="" BACKUP_TYPE="" BACKUP_FREQUENCY="" BACKUP_DAY=""
     BACKUP_TIME="" RETENTION_PERIOD="" BACKUP_REMOTE="" REMOTE_BACKUP_LOCATION=""
-    BACKUP_PASS="" EXCLUDED_ITEMS="" ASSUME_YES=false
+    BACKUP_PASS="" EXCLUDED_ITEMS="" ASSUME_YES=false SKIP_INITIAL=false
     local hl_path="" hl_day="" hl_exclude_set=false
     local flag val
 
@@ -50,6 +52,11 @@ run_headless() {
             ;;
         --yes)
             ASSUME_YES=true
+            shift
+            continue
+            ;;
+        --no-initial)
+            SKIP_INITIAL=true
             shift
             continue
             ;;
