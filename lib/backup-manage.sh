@@ -145,7 +145,7 @@ manage_automated_backups() {
         # Ask the user to select a backup for detailed management
         read -p "$(echo -e "${BOLD}${BLUE}Select a backup to manage (or 'q' to go back): ${RESET}")" choice
 
-        if [ "$choice" == "q" ]; then
+        if [ "${choice,,}" == "q" ]; then
             clear_screen "force"
             return
         fi
@@ -251,7 +251,7 @@ manage_automated_backups() {
 
                 # Confirm with the user before deleting the backup
                 read -p "$(echo -e "${BOLD}${RED}Choose an action (c: Confirm deletion, b: Bail out): ${RESET}")" confirm
-                if [ "$confirm" == "c" ]; then
+                if [ "${confirm,,}" == "c" ]; then
                     # Remove the backup script file
                     sudo rm -f "$selected_backup_script"
 
@@ -289,7 +289,7 @@ manage_automated_backups() {
                     read -p "$(echo -e "${BOLD}${BLUE}Enter the ID of the backup you'd like to restore ( or q to go back ): ${RESET}")" selected_remote_backup
 
                     # Go back if the user typed q
-                    if [ $selected_remote_backup == "q" ]; then
+                    if [ "${selected_remote_backup,,}" == "q" ]; then
                         restore_cursor_position
                         break # break out of the select statement to restart the while loop
                     fi
@@ -304,7 +304,7 @@ manage_automated_backups() {
                     read -p "$(echo -e "${BOLD}${BLUE}Enter the number of your choice (1/2)${RESET} ${BLUE}( or q to go back ): ${RESET}")" restore_approach_choice
 
                     # Go back if the user typed q
-                    if [ $restore_approach_choice == "q" ]; then
+                    if [ "${restore_approach_choice,,}" == "q" ]; then
                         restore_cursor_position
                         break # break out of the select statement to restart the while loop
                     fi
@@ -423,7 +423,7 @@ manage_automated_backups() {
                     read -p "$(echo -e "${BOLD}${BLUE}Enter the number of the backup to restore (1-${#remote_backup_lines[@]}) ${BLUE}( or q to go back ): ${RESET}")" restore_choice
 
                     # Go back if the user typed q
-                    if [ "$restore_choice" == "q" ]; then
+                    if [ "${restore_choice,,}" == "q" ]; then
                         restore_cursor_position
                         break # break out of the select statement to restart the while loop
                     fi
@@ -445,13 +445,13 @@ manage_automated_backups() {
                     read -p "$(echo -e "${BOLD}${BLUE}Proceed with the database restore? (y/n)${RESET} ${BLUE}( or q to go back ): ${RESET}")" db_restore_confirm
 
                     # Go back if the user typed q
-                    if [ "$db_restore_confirm" == "q" ]; then
+                    if [ "${db_restore_confirm,,}" == "q" ]; then
                         restore_cursor_position
                         break # break out of the select statement to restart the while loop
                     fi
 
                     # Handle the user's restore choice
-                    if [[ "$db_restore_confirm" == "y" || "$db_restore_confirm" == "yes" ]]; then
+                    if [[ "${db_restore_confirm,,}" == "y" || "${db_restore_confirm,,}" == "yes" ]]; then
                         restore_cursor_position
 
                         # Show a pre-restore backup notice
@@ -572,7 +572,7 @@ manage_automated_backups() {
                     fi
 
                     # Go back if the user typed q
-                    if [ $restore_choice == "q" ]; then
+                    if [ "${restore_choice,,}" == "q" ]; then
                         restore_cursor_position
                         break # break out of the select statement to restart the while loop
                     fi
@@ -589,7 +589,7 @@ manage_automated_backups() {
 
                     read -p "$(echo -e "${BOLD}${BLUE}Enter the number of your choice (1/2)${RESET} ${BLUE}( or q to go back ): ${RESET}")" restore_approach_choice
                     # Go back if the user typed q
-                    if [ $restore_approach_choice == "q" ]; then
+                    if [ "${restore_approach_choice,,}" == "q" ]; then
                         restore_cursor_position
                         break # break out of the select statement to restart the while loop
                     fi

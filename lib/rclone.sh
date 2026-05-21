@@ -14,7 +14,7 @@ configure_rclone() {
         echo -e "${BOLD}${UNDERLINE}Re-configure rclone${RESET}"
 
         read -p "$(echo -e "${BOLD}${BLUE}Rclone has existing remotes, would you like to re-configure it (y/n): ${RESET}")" config
-        if [ $config == "y" ] || [ $config == "yes" ]; then
+        if [ "${config,,}" == "y" ] || [ "${config,,}" == "yes" ]; then
             # Configure rclone
             configure_rclone=true
         fi

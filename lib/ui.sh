@@ -58,7 +58,7 @@ restore_cursor_position() {
 # a maximum count. On success echoes the space-separated 1-based indexes and returns
 # 0; on any invalid or empty input echoes nothing and returns 1.
 parse_index_selection() {
-    local input="$1"
+    local input="${1,,}"
     local count="$2"
     local -a chosen=()
     local i

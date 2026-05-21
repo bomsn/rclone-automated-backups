@@ -76,7 +76,7 @@ add_domain_manual() {
 
     read -p "$(echo -e "${BOLD}${BLUE}Enter a domain${RESET} ${BLUE}( or q to go back ): ${RESET}")" domain
 
-    if [ "$domain" == "q" ]; then
+    if [ "${domain,,}" == "q" ]; then
         manage_domains
         return
     fi
@@ -113,7 +113,7 @@ add_domain_manual() {
     # Get the WordPress installation dir for that domain
     read -p "$(echo -e "${BOLD}${BLUE}Enter the WordPress installation's full path for $sanitized_domain${RESET} ${BLUE}( or q to go back ): ${RESET}")" path
 
-    if [ "$path" == "q" ]; then
+    if [ "${path,,}" == "q" ]; then
         add_domain_manual
         return
     fi
@@ -215,7 +215,7 @@ add_domain_discover() {
         echo -e "${YELLOW}No new WordPress installations were discovered automatically.${RESET}"
         echo ""
         read -p "$(echo -e "${BOLD}${BLUE}Add a site manually instead? (y/n): ${RESET}")" go_manual
-        if [[ "$go_manual" == "y" || "$go_manual" == "yes" ]]; then
+        if [[ "${go_manual,,}" == "y" || "${go_manual,,}" == "yes" ]]; then
             add_domain_manual
         fi
         return
@@ -268,7 +268,7 @@ multiselect_discovered() {
         sel_input="${sel_input#"${sel_input%%[![:space:]]*}"}"
         sel_input="${sel_input%"${sel_input##*[![:space:]]}"}"
 
-        if [ "$sel_input" == "q" ]; then
+        if [ "${sel_input,,}" == "q" ]; then
             clear_screen "force"
             echo -e "${YELLOW}Cancelled, nothing was added.${RESET}"
             echo ""
@@ -309,7 +309,7 @@ multiselect_discovered() {
         echo ""
         read -p "$(echo -e "${BOLD}${BLUE}Add these?  y = yes  ·  n = choose again  ·  q = cancel: ${RESET}")" confirm
 
-        case "$confirm" in
+        case "${confirm,,}" in
         y | yes)
             for ((i = 0; i < ${#to_add_domains[@]}; i++)); do
                 DOMAINS+=("${to_add_domains[i]}")
@@ -352,7 +352,7 @@ delete_domain() {
     echo -e "${BOLD}${YELLOW}Note: ${RESET}${YELLOW}the automated backups created for the selected domain will NOT be effected.${RESET}"
     read -p "$(echo -e "${BOLD}${BLUE}Enter a domain to delete${RESET} ${BLUE}( or q to go back ): ${RESET}")" domain_to_delete
 
-    if [ $domain_to_delete == "q" ]; then
+    if [ "${domain_to_delete,,}" == "q" ]; then
         manage_domains
         return
     fi

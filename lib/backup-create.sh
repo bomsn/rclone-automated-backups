@@ -366,13 +366,23 @@ collect_backup_settings() {
     fi
     echo -e "${BOLD}Remote Backup Location:${RESET} $REMOTE_BACKUP_LOCATION"
 
-    read -p "$(echo -e "${BOLD}${BLUE}Are you sure you want to proceed with the above configurations? (y/n): ${RESET}")" confirm
-    if [[ $confirm != "y" && $confirm != "yes" ]]; then
-        clear_screen "force"
-        echo -e "${YELLOW}Please select your preferences again.${RESET}"
-        collect_backup_settings
-        return
-    fi
+    while true; do
+        read -p "$(echo -e "${BOLD}${BLUE}Are you sure you want to proceed with the above configurations? (y/n): ${RESET}")" confirm
+        case "${confirm,,}" in
+        y | yes)
+            break
+            ;;
+        n | no)
+            clear_screen "force"
+            echo -e "${YELLOW}Please select your preferences again.${RESET}"
+            collect_backup_settings
+            return
+            ;;
+        *)
+            echo -e "${RED}Please answer y ( yes ) or n ( no ).${RESET}"
+            ;;
+        esac
+    done
 
 }
 
@@ -592,7 +602,7 @@ create_backup_from_settings() {
                 echo ""
                 read -p "$(echo -e "${BOLD}${BLUE}Do you confirm that the test file has been created succesfully on your remote server? (y/n): ${RESET}")" rclone_remote_push_success
 
-                if [[ -n "$rclone_remote_push_success" && ("$rclone_remote_push_success" == "y" || "$rclone_remote_push_success" == "yes") ]]; then
+                if [[ -n "$rclone_remote_push_success" && ("${rclone_remote_push_success,,}" == "y" || "${rclone_remote_push_success,,}" == "yes") ]]; then
                     # Copy was successful
                     rclone_remote_valid=true
                     # Delete leftovers
@@ -1085,7 +1095,7 @@ EOF
             echo -e "${RED}Something went wrong, please make sure the selected rclone remote is correctly configured.${RESET}"
             echo -e "${RED}Also note that if you're using object based storage, your backup location should start with a bucket name.${RESET}"
             read -p "$(echo -e "${BLUE}Would you like to open rclone configuration screen? (y/n): ${RESET}")" rclone_reconfig
-            if [ $rclone_reconfig == "y" ] || [ $rclone_reconfig == "yes" ]; then
+            if [ "${rclone_reconfig,,}" == "y" ] || [ "${rclone_reconfig,,}" == "yes" ]; then
                 configure_rclone
                 generate_backup_script
             else

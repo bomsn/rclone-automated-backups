@@ -32,13 +32,13 @@ configure_notifications() {
     read -p "$(echo -e "${BOLD}${BLUE}Email address: ${RESET}")" input
 
     # Go back without changes
-    if [ "$input" == "q" ]; then
+    if [ "${input,,}" == "q" ]; then
         clear_screen "force"
         return
     fi
 
     # Disable notifications
-    if [ "$input" == "disable" ]; then
+    if [ "${input,,}" == "disable" ]; then
         NOTIFY_EMAIL=""
         update_definitions
         clear_screen "force"
