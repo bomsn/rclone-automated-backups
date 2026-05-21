@@ -185,7 +185,7 @@ add_domain_discover() {
         # Read the canonical domain from WordPress itself ( stack-agnostic )
         site_domain=""
         if [ -n "$owner" ]; then
-            site_domain=$(sudo -u "$owner" -s -- $WP_RUN option get siteurl --path="$wp_path" --skip-plugins --skip-themes 2>/dev/null)
+            site_domain=$(run_wp_cli_as "$owner" option get siteurl --path="$wp_path" --skip-plugins --skip-themes 2>/dev/null)
         fi
         site_domain=$(echo "$site_domain" | sed -e 's|^https://||' -e 's|^http://||' -e 's|^www\.||' -e 's|/.*$||')
         # Fall back to the directory name when wp-cli is unavailable or fails
