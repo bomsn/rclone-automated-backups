@@ -44,7 +44,7 @@ add_domain() {
 
     local original_ps3="$PS3"
     PS3="$(echo -e "${BOLD}${BLUE}Type the desired option number to continue: ${RESET}")"
-    select method in "Auto-discover WordPress sites" "Enter the path manually" "Go back"; do
+    select method in "Auto-discover WordPress sites" "Enter the path manually" "Enter a non-WordPress directory" "Go back"; do
         case "$method" in
         "Auto-discover WordPress sites")
             PS3="$original_ps3"
@@ -54,6 +54,11 @@ add_domain() {
         "Enter the path manually")
             PS3="$original_ps3"
             add_domain_manual
+            return
+            ;;
+        "Enter a non-WordPress directory")
+            PS3="$original_ps3"
+            add_domain_nonwp
             return
             ;;
         "Go back")
@@ -67,6 +72,78 @@ add_domain() {
         esac
     done
     PS3="$original_ps3"
+}
+
+# Function to add a non-WordPress directory ( for use with the "files" backup
+# type or the "mysqldump" DB driver ). Skips the WordPress install check and
+# just validates that the path exists.
+add_domain_nonwp() {
+
+    clear_screen "force"
+
+    echo -e "${BOLD}${UNDERLINE}Add a site/domain > Enter a non-WordPress directory${RESET}"
+    echo -e "${YELLOW}Use this for any directory you want to back up that is not a${RESET}"
+    echo -e "${YELLOW}WordPress install ( forums, custom apps, static sites, etc. ).${RESET}"
+    echo ""
+
+    read -p "$(echo -e "${BOLD}${BLUE}Enter an identifier ( domain-like name )${RESET} ${BLUE}( or q to go back ): ${RESET}")" domain
+
+    if [ "${domain,,}" == "q" ]; then
+        manage_domains
+        return
+    fi
+
+    local sanitized_domain=$(echo "$domain" | sed -e 's|^https://||' -e 's|^http://||' -e 's|^www\.||' -e 's|/.*$||')
+    local domain_pattern="^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"
+    if [[ ! "$sanitized_domain" =~ $domain_pattern ]]; then
+        clear_screen "force"
+        echo -e "${RED}"${domain}" is not a valid identifier ( must look like a domain, eg; mysite.example ).${RESET}"
+        return
+    fi
+
+    if [ "$domain" != "$sanitized_domain" ]; then
+        echo -e "${YELLOW}Identifier interpreted as:${RESET} ${BOLD}$sanitized_domain${RESET}"
+    fi
+
+    local duplicate=false
+    for existing_domain in "${DOMAINS[@]}"; do
+        if [ "$existing_domain" == "$sanitized_domain" ]; then
+            duplicate=true
+            break
+        fi
+    done
+    if [ "$duplicate" == true ]; then
+        clear_screen "force"
+        echo -e "${RED}Identifier $sanitized_domain is already in the list.${RESET}"
+        return
+    fi
+
+    read -p "$(echo -e "${BOLD}${BLUE}Enter the full directory path for $sanitized_domain${RESET} ${BLUE}( or q to go back ): ${RESET}")" path
+
+    if [ "${path,,}" == "q" ]; then
+        add_domain_nonwp
+        return
+    fi
+
+    if [[ ! "$path" == /* ]]; then
+        path="/$path"
+    fi
+    path="${path%/}"
+
+    if [ ! -d "$path" ]; then
+        clear_screen "force"
+        echo -e "${RED}Directory $path does not exist or is not a directory.${RESET}"
+        return
+    fi
+
+    DOMAINS+=("$sanitized_domain")
+    PATHS+=("$path")
+    update_definitions
+    clear_screen "force"
+    echo -e "${GREEN}Non-WordPress directory $sanitized_domain added successfully.${RESET}"
+    echo -e "${GREEN}Path:${RESET} ${BOLD}$path${RESET}"
+    echo -e "${YELLOW}Use --type files ( or --type full/database with --db-driver mysqldump${RESET}"
+    echo -e "${YELLOW}once you have set up that driver ) when creating a backup for this entry.${RESET}"
 }
 
 # Function to add a domain/path by manually typing them in

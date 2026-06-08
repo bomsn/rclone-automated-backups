@@ -163,16 +163,19 @@ collect_backup_settings() {
     done
     PS3="$original_ps3" # Restore the original PS3 value
 
-    # Collect backup type early. A database-only backup never touches site
-    # files, so choosing it here lets the file-exclude step be skipped.
-    # full        = whole site files + database in one archive
-    # incremental = restic-based snapshots of the whole site ( requires restic )
+    # Collect backup type early. A database-only or files-only backup follows a
+    # different code path, so choosing it here lets the right step be skipped.
+    # full        = whole site files + database in one archive ( WordPress )
+    # incremental = restic-based snapshots of the whole site + database
+    #               ( requires restic; WordPress )
     # database    = database-only backup ( lightweight, ideal for a daily schedule )
+    # files       = files-only backup of any directory ( no database, no WordPress
+    #               assumptions; use this for non-WP folders )
     PS3="$(echo -e "${BOLD}${BLUE}Choose backup type: ${RESET}")"
     if [ $RESTIC_AVAILABLE == true ]; then
-        select type in "full" "incremental" "database"; do
+        select type in "full" "incremental" "database" "files"; do
             case $type in
-            full | incremental | database)
+            full | incremental | database | files)
                 BACKUP_TYPE="$type"
                 break
                 ;;
@@ -182,9 +185,9 @@ collect_backup_settings() {
             esac
         done
     else
-        select type in "full" "database"; do
+        select type in "full" "database" "files"; do
             case $type in
-            full | database)
+            full | database | files)
                 BACKUP_TYPE="$type"
                 break
                 ;;
@@ -770,14 +773,18 @@ run_wp_cli_as() {
     fi
 }
 
-if [ ! -f "\${wp_cli}" ]; then
-    echo "[\${timestamp}] ERROR: wp-cli not found at '\${wp_cli}'. Aborting backup." >> "$LOG_FILE"
-    exit 1
-fi
+# wp-cli and PHP are only needed for backup types that touch the database. A
+# files-only backup just tars a directory, so skip the guards there.
+if [ "\${type}" != "files" ]; then
+    if [ ! -f "\${wp_cli}" ]; then
+        echo "[\${timestamp}] ERROR: wp-cli not found at '\${wp_cli}'. Aborting backup." >> "$LOG_FILE"
+        exit 1
+    fi
 
-if [ -z "\${wp_php}" ] && ! command -v php >/dev/null 2>&1; then
-    echo "[\${timestamp}] ERROR: PHP is not on PATH and no fallback binary was found under /opt/plesk/php, /opt/cpanel/ea-php*/root/usr/bin, /usr/local/bin, or /usr/bin. Aborting backup." >> "$LOG_FILE"
-    exit 1
+    if [ -z "\${wp_php}" ] && ! command -v php >/dev/null 2>&1; then
+        echo "[\${timestamp}] ERROR: PHP is not on PATH and no fallback binary was found under /opt/plesk/php, /opt/cpanel/ea-php*/root/usr/bin, /usr/local/bin, or /usr/bin. Aborting backup." >> "$LOG_FILE"
+        exit 1
+    fi
 fi
 
 # Email a failure alert if this backup exits with an error ( one alert per failed run ).
@@ -944,6 +951,78 @@ echo "[\${timestamp}] - Delete the internally generated database backup to free 
 
 # Delete the locally generated database archive
 sudo rm -f "\${db_archive}"
+
+echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+
+# Delete old backups from remote ( retention logic )
+sudo rclone delete --min-age \${retention_period}d "\${rclone_remote}":"\${remote_backup_location}"
+
+EOF
+
+        elif [ $remote_backup_type == "files" ]; then
+            # Files-only backup: tar the target directory ( no database, no
+            # WordPress assumptions ). Mirrors the full branch minus the DB
+            # hunks so non-WP folders can be backed up by the same tool.
+            cat <<EOF >>"$script_path"
+
+if [ \${call_type} == "restore" ]; then
+    echo "[\${timestamp}] - Generating pre-restore backup archive" >> "$LOG_FILE"
+    backup_filename=\${tmp_path}/\${hash}_\${domain//./-}_\${backup_date}-pre-restore.tar.gz
+else
+    echo "[\${timestamp}] - Generating backup archive" >> "$LOG_FILE"
+    backup_filename=\${tmp_path}/\${hash}_\${domain//./-}_\${backup_date}.tar.gz
+fi
+
+# --- Backup Logic ---
+
+echo "[\${timestamp}] - Attempting direct tar backup" >> "$LOG_FILE"
+
+backup_success=false
+
+if sudo test "\${call_type}" = "restore"; then
+    # Pre-restore: tar without excludes so the restore-baseline is complete
+    if sudo tar --warning=no-file-changed --transform 's,^\./,,' -czf "\${backup_filename}.tmp" -C "\${domain_path}/" . 2>> "$LOG_FILE"; then
+        backup_success=true
+        echo "[\${timestamp}] - Direct tar backup successful" >> "$LOG_FILE"
+    else
+        echo "[\${timestamp}] - Direct tar backup failed" >> "$LOG_FILE"
+    fi
+else
+    # Scheduled run: apply excludes
+    if sudo tar --warning=no-file-changed --transform 's,^\./,,' $excludes -czf "\${backup_filename}.tmp" -C "\${domain_path}/" . 2>> "$LOG_FILE"; then
+        backup_success=true
+        echo "[\${timestamp}] - Direct tar backup successful" >> "$LOG_FILE"
+    else
+        echo "[\${timestamp}] - Direct tar backup failed" >> "$LOG_FILE"
+    fi
+fi
+
+if [ "\$backup_success" = false ]; then
+    echo "[\${timestamp}] ERROR: tar backup failed" >> "$LOG_FILE"
+    sudo rm -f "\${backup_filename}.tmp"
+    exit 1
+fi
+
+# Rename the temporary backup file to the actual name to indicate that the compression completed
+sudo mv "\${backup_filename}.tmp" "\${backup_filename}"
+
+# --- End Backup Logic ---
+
+echo "[\${timestamp}] - backup archive generated: "\${backup_filename}"" >> "$LOG_FILE"
+echo "[\${timestamp}] - Sending the backup file to remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+
+# Copy the generated backup to the remote location using rclone
+if ! sudo rclone copy \$backup_filename \${rclone_remote}:\${remote_backup_location}; then
+    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "$LOG_FILE"
+    sudo rm -f "\${backup_filename}"
+    exit 1
+fi
+
+echo "[\${timestamp}] - backup file sent to the remote location successfully" >> "$LOG_FILE"
+echo "[\${timestamp}] - Delete the internally generated backup files to free space" >> "$LOG_FILE"
+
+# Delete the generated backup archive
+sudo rm \${backup_filename}
 
 echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
 

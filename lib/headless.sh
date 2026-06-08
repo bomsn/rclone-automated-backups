@@ -11,8 +11,8 @@ Usage: sudo bash config.sh --domain <d> --type <t> --frequency <f> \
        --time <HH:MM> --retention <n> --remote <r> --location <loc> [options]
 
 Required:
-  --domain     <domain>   site domain ( stored, or new together with --path )
-  --type       <type>     full | incremental | database
+  --domain     <domain>   site domain or identifier ( stored, or new together with --path )
+  --type       <type>     full | incremental | database | files
   --frequency  <freq>     daily | weekly | monthly
   --time       <HH:MM>    backup time in the SERVER's timezone ( eg; 02:00 )
   --retention  <days>     3 | 7 | 30 | 90 | 180
@@ -20,7 +20,9 @@ Required:
   --location   <path>     backup location on the remote
 
 Conditional / optional:
-  --path       <path>     WordPress path; required when --domain is new
+  --path       <path>     path; required when --domain is new. Must point at
+                          a WordPress install for full/incremental/database;
+                          can be any directory for --type files.
   --day        <day>      required for weekly ( monday..sunday ) and monthly
                           ( 1..28 or last ); not allowed with daily
   --exclude    <list>     comma-separated paths, or "none"; omit to
@@ -105,9 +107,9 @@ run_headless() {
 
     # --- value validation ( same rules as the interactive prompts ) ---
     case "$BACKUP_TYPE" in
-    full | incremental | database) ;;
+    full | incremental | database | files) ;;
     *)
-        headless_usage "--type must be full, incremental or database"
+        headless_usage "--type must be full, incremental, database or files"
         return 2
         ;;
     esac
@@ -199,7 +201,9 @@ run_headless() {
             headless_usage "'$BACKUP_DOMAIN' is not a valid domain name"
             return 2
         fi
-        # --path is required for a new domain and must hold a WordPress install
+        # --path is required for a new domain. For --type files the directory
+        # just needs to exist; for the WP-centric types it must hold a
+        # WordPress install ( wp-config.php discoverable via derive_wp_path ).
         if [ -z "$hl_path" ]; then
             headless_usage "--path is required for the new domain '$BACKUP_DOMAIN'"
             return 2
@@ -209,10 +213,18 @@ run_headless() {
         fi
         hl_path="${hl_path%/}"
         local resolved
-        resolved=$(derive_wp_path "$hl_path")
-        if [ -z "$resolved" ]; then
-            headless_usage "no WordPress installation found under '$hl_path'"
-            return 2
+        if [ "$BACKUP_TYPE" == "files" ]; then
+            if [ ! -d "$hl_path" ]; then
+                headless_usage "directory '$hl_path' does not exist"
+                return 2
+            fi
+            resolved="$hl_path"
+        else
+            resolved=$(derive_wp_path "$hl_path")
+            if [ -z "$resolved" ]; then
+                headless_usage "no WordPress installation found under '$hl_path'"
+                return 2
+            fi
         fi
         # Persist under a lock so concurrent headless runs cannot lose each other
         persist_new_domain "$BACKUP_DOMAIN" "$resolved"

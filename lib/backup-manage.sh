@@ -637,14 +637,19 @@ manage_automated_backups() {
                     fi
                 fi
 
-                # Show a db import notice
-                echo ""
-                echo -e "${YELLOW}Importing the database ...${RESET}"
-                # Now import the database using wp cli and delete it afterwards
-                local wp_owner=$(sudo stat -c "%U" ${selected_backup_path})                                                # get WordPress folder owner
-                local sql_file=$(find "$selected_backup_path" -type f -name "*${selected_backup_hash}_*.sql" -print -quit) # find the sql file path
-                run_wp_cli_as "${wp_owner}" db import "${sql_file}" --path="${selected_backup_path}" --skip-plugins --skip-themes          # import db
-                sudo rm "${sql_file}"                                                                                      # Delete the SQL file after it's been imported
+                # A files-only backup has no database to import - the archive
+                # is just the directory contents. Skip the DB import step for
+                # those entries; everything below is wp-cli-driven.
+                if [ "$selected_backup_type" != "files" ]; then
+                    # Show a db import notice
+                    echo ""
+                    echo -e "${YELLOW}Importing the database ...${RESET}"
+                    # Now import the database using wp cli and delete it afterwards
+                    local wp_owner=$(sudo stat -c "%U" ${selected_backup_path})                                                # get WordPress folder owner
+                    local sql_file=$(find "$selected_backup_path" -type f -name "*${selected_backup_hash}_*.sql" -print -quit) # find the sql file path
+                    run_wp_cli_as "${wp_owner}" db import "${sql_file}" --path="${selected_backup_path}" --skip-plugins --skip-themes          # import db
+                    sudo rm "${sql_file}"                                                                                      # Delete the SQL file after it's been imported
+                fi
 
                 clear_screen "force"
                 # Show a success message
