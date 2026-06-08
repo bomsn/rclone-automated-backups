@@ -226,16 +226,37 @@ collect_backup_settings() {
             echo -e "${YELLOW}only ). At backup time they are passed via --defaults-extra-file${RESET}"
             echo -e "${YELLOW}so they never appear in ps / argv.${RESET}"
             echo ""
-            read -p "$(echo -e "${BOLD}${BLUE}Database name: ${RESET}")" DB_NAME
-            read -p "$(echo -e "${BOLD}${BLUE}Database user: ${RESET}")" DB_USER
-            read -s -p "$(echo -e "${BOLD}${BLUE}Database password: ${RESET}")" DB_PASS
-            echo ""
+            # Re-prompt on empty input so a stray Enter cannot silently produce
+            # a non-functional backup script.
+            while true; do
+                read -p "$(echo -e "${BOLD}${BLUE}Database name: ${RESET}")" DB_NAME
+                [ -n "$DB_NAME" ] && break
+                echo -e "${RED}Database name is required.${RESET}"
+            done
+            while true; do
+                read -p "$(echo -e "${BOLD}${BLUE}Database user: ${RESET}")" DB_USER
+                [ -n "$DB_USER" ] && break
+                echo -e "${RED}Database user is required.${RESET}"
+            done
+            while true; do
+                read -s -p "$(echo -e "${BOLD}${BLUE}Database password: ${RESET}")" DB_PASS
+                echo ""
+                if [ -z "$DB_PASS" ]; then
+                    echo -e "${RED}Database password is required.${RESET}"
+                    continue
+                fi
+                if [[ "$DB_PASS" == *$'\n'* ]]; then
+                    echo -e "${RED}Password must not contain a newline character.${RESET}"
+                    continue
+                fi
+                # Confirm by re-typing, same protection as the restic password prompt
+                read -s -p "$(echo -e "${BOLD}${BLUE}Confirm database password: ${RESET}")" DB_PASS_CONFIRM
+                echo ""
+                [ "$DB_PASS" = "$DB_PASS_CONFIRM" ] && break
+                echo -e "${RED}Passwords do not match. Please try again.${RESET}"
+            done
             read -p "$(echo -e "${BOLD}${BLUE}Database host [localhost]: ${RESET}")" DB_HOST
             DB_HOST="${DB_HOST:-localhost}"
-            if [[ "$DB_PASS" == *$'\n'* ]]; then
-                echo -e "${RED}Password must not contain a newline character.${RESET}"
-                return
-            fi
         fi
     fi
 
@@ -922,13 +943,28 @@ EOF
         # parsing of the assignment line AND grep extraction at restore time.
         # The script is chmod 700 ( root-readable only ).
         if [ "$db_driver" == "mysqldump" ]; then
+            # Fail early at script-creation time if base64 is missing on the
+            # server doing the create. base64 is part of GNU coreutils and is
+            # present on every supported Linux distribution, but checking now
+            # turns a silent runtime failure into a clear setup error.
+            if ! command -v base64 >/dev/null 2>&1; then
+                echo -e "${RED}base64 is required for the mysqldump driver but was not found on PATH.${RESET}" >&2
+                echo -e "${YELLOW}Install coreutils ( apt install coreutils / yum install coreutils ) and retry.${RESET}" >&2
+                return 1
+            fi
             printf 'db_name_b64=%s\n' "$(printf '%s' "$db_name" | base64 -w0)" >> "$script_path"
             printf 'db_user_b64=%s\n' "$(printf '%s' "$db_user" | base64 -w0)" >> "$script_path"
             printf 'db_pass_b64=%s\n' "$(printf '%s' "$db_pass" | base64 -w0)" >> "$script_path"
             printf 'db_host_b64=%s\n' "$(printf '%s' "$db_host" | base64 -w0)" >> "$script_path"
             # Decode into runtime vars so the dispatch branches can reference
             # them by their plain names just like any other baked variable.
+            # The runtime guard below catches the rare case where base64 was
+            # removed AFTER the script was generated.
             cat >> "$script_path" <<'CREDS_DECODE'
+if ! command -v base64 >/dev/null 2>&1; then
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: base64 not found - mysqldump credentials cannot be decoded. Aborting backup."
+    exit 1
+fi
 db_name=$(printf '%s' "$db_name_b64" | base64 -d)
 db_user=$(printf '%s' "$db_user_b64" | base64 -d)
 db_pass=$(printf '%s' "$db_pass_b64" | base64 -d)
@@ -1313,13 +1349,21 @@ EOF
         fi
         # Add the cron job, unless an identical entry ( or one for the same script )
         # already exists in either the current or legacy cron file.
+        #
+        # The grep-then-append is guarded by an exclusive flock so concurrent
+        # headless runs ( eg; a bulk rollout that scripts 30 sites in parallel )
+        # cannot race and produce duplicate cron lines.
         local cron_line="$cron_expression root /bin/bash $PWD/$script_path"
-        if grep -Fqx "$cron_line" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null \
-            || grep -Fq "$(basename "$script_path")" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null; then
-            echo -e "${YELLOW}A cron entry for this backup already exists, skipping cron update.${RESET}"
-        else
-            echo "$cron_line" >>"$CRON_FILE"
-        fi
+        (
+            exec 8>"/tmp/rclone-automated-backups-cron-write.lock"
+            flock 8
+            if grep -Fqx "$cron_line" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null \
+                || grep -Fq "$(basename "$script_path")" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null; then
+                echo -e "${YELLOW}A cron entry for this backup already exists, skipping cron update.${RESET}"
+            else
+                echo "$cron_line" >>"$CRON_FILE"
+            fi
+        )
 
         # Show success message
         if [ "$mode" == "interactive" ]; then

@@ -667,6 +667,10 @@ manage_automated_backups() {
                     [ -z "$backup_db_driver" ] && backup_db_driver="wpcli"
 
                     if [ "$backup_db_driver" == "mysqldump" ]; then
+                        if ! command -v base64 >/dev/null 2>&1; then
+                            echo -e "${RED}base64 is required to decode mysqldump credentials but was not found on PATH.${RESET}" >&2
+                            return 1
+                        fi
                         # Credentials are stored base64-encoded ( see the bake
                         # site in lib/backup-create.sh ) so any byte sequence
                         # in the password survives. Decode them here.
