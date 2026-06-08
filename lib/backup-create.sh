@@ -742,16 +742,20 @@ remote_backup_location="${remote_backup_location}"
 timestamp=\$(date +'%Y-%m-%d %H:%M:%S')
 backup_date=\$(date +'%d-%m-%Y_%H-%M')
 
-# Resolve how to run wp-cli. Standard servers run wp directly; Plesk may need
-# an explicit /opt/plesk PHP binary because no php command is exposed on PATH.
+# Resolve how to run wp-cli. Standard servers run wp directly; Plesk and cPanel
+# may need an explicit PHP binary because no php command is exposed on PATH.
 wp_cli="${wp_cli_path}"
 wp_php=""
-if command -v php >/dev/null 2>&1; then
-    :
-else
-    for php_candidate in \$(find /opt/plesk/php -mindepth 3 -maxdepth 3 -path '*/bin/php' -type f -perm -111 2>/dev/null | sort -Vr); do
-        wp_php="\${php_candidate}"
-        break
+if ! command -v php >/dev/null 2>&1; then
+    php_candidates=""
+    php_candidates="\${php_candidates} \$(find /opt/plesk/php -mindepth 3 -maxdepth 3 -path '*/bin/php' -type f -perm -111 2>/dev/null | sort -Vr)"
+    php_candidates="\${php_candidates} \$(find /opt/cpanel -mindepth 5 -maxdepth 5 -path '*/ea-php*/root/usr/bin/php' -type f -perm -111 2>/dev/null | sort -Vr)"
+    php_candidates="\${php_candidates} /usr/local/bin/php /usr/bin/php"
+    for php_candidate in \${php_candidates}; do
+        if [ -x "\${php_candidate}" ]; then
+            wp_php="\${php_candidate}"
+            break
+        fi
     done
 fi
 
@@ -772,7 +776,7 @@ if [ ! -f "\${wp_cli}" ]; then
 fi
 
 if [ -z "\${wp_php}" ] && ! command -v php >/dev/null 2>&1; then
-    echo "[\${timestamp}] ERROR: PHP is not on PATH and no Plesk PHP binary was found under /opt/plesk/php. Aborting backup." >> "$LOG_FILE"
+    echo "[\${timestamp}] ERROR: PHP is not on PATH and no fallback binary was found under /opt/plesk/php, /opt/cpanel/ea-php*/root/usr/bin, /usr/local/bin, or /usr/bin. Aborting backup." >> "$LOG_FILE"
     exit 1
 fi
 

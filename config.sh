@@ -68,9 +68,14 @@ resolve_wp_cli_runtime() {
   fi
 
   local php_candidate
-  for php_candidate in $(find /opt/plesk/php -mindepth 3 -maxdepth 3 -path '*/bin/php' -type f -perm -111 2>/dev/null | sort -Vr); do
-    WP_PHP_BIN="$php_candidate"
-    return 0
+  for php_candidate in \
+    $(find /opt/plesk/php -mindepth 3 -maxdepth 3 -path '*/bin/php' -type f -perm -111 2>/dev/null | sort -Vr) \
+    $(find /opt/cpanel -mindepth 5 -maxdepth 5 -path '*/ea-php*/root/usr/bin/php' -type f -perm -111 2>/dev/null | sort -Vr) \
+    /usr/local/bin/php /usr/bin/php; do
+    if [ -x "$php_candidate" ]; then
+      WP_PHP_BIN="$php_candidate"
+      return 0
+    fi
   done
 
   return 0
@@ -174,11 +179,12 @@ else
   exit 1
 fi
 
-# Verify wp-cli can run. Standard servers use wp directly; Plesk may need an
-# explicit /opt/plesk PHP binary because no `php` command is exposed on PATH.
+# Verify wp-cli can run. Standard servers use wp directly; Plesk and cPanel may
+# need an explicit PHP binary because no `php` command is exposed on PATH.
 if ! run_wp_cli cli version --allow-root &>/dev/null; then
-  echo -e "${RED}2b. wp-cli could not run - it needs PHP. Install php-cli, or on${RESET}"
-  echo -e "${RED}    Plesk make sure /opt/plesk/php/*/bin/php exists.${RESET}"
+  echo -e "${RED}2b. wp-cli could not run - it needs PHP. Install php-cli, or make${RESET}"
+  echo -e "${RED}    sure /opt/plesk/php/*/bin/php ( Plesk ) or${RESET}"
+  echo -e "${RED}    /opt/cpanel/ea-php*/root/usr/bin/php ( cPanel ) exists.${RESET}"
   echo ""
   exit 1
 fi
