@@ -199,6 +199,46 @@ collect_backup_settings() {
     fi
     PS3="$original_ps3" # Restore the original PS3 value
 
+    # Collect the database driver for backup types that touch the database.
+    # wpcli ( default ) reads credentials from wp-config.php; mysqldump uses
+    # explicit credentials supplied here, useful for non-WP databases and for
+    # cases where wp-cli is unavailable. Incremental and files types skip this.
+    DB_DRIVER="wpcli"
+    DB_NAME=""
+    DB_USER=""
+    DB_PASS=""
+    DB_HOST="localhost"
+    if [[ "$BACKUP_TYPE" == "database" || "$BACKUP_TYPE" == "full" ]]; then
+        PS3="$(echo -e "${BOLD}${BLUE}Choose database driver: ${RESET}")"
+        select driver in "wp-cli ( reads credentials from wp-config.php )" "mysqldump ( supply credentials manually )"; do
+            case "$driver" in
+            "wp-cli"*) DB_DRIVER="wpcli"; break ;;
+            "mysqldump"*) DB_DRIVER="mysqldump"; break ;;
+            *) echo -e "${RED}Invalid option. Please select a valid driver.${RESET}" ;;
+            esac
+        done
+        PS3="$original_ps3"
+
+        if [ "$DB_DRIVER" == "mysqldump" ]; then
+            echo ""
+            echo -e "${YELLOW}mysqldump credentials are stored in plain text inside the${RESET}"
+            echo -e "${YELLOW}generated backup script ( file is chmod 700, root-readable${RESET}"
+            echo -e "${YELLOW}only ). At backup time they are passed via --defaults-extra-file${RESET}"
+            echo -e "${YELLOW}so they never appear in ps / argv.${RESET}"
+            echo ""
+            read -p "$(echo -e "${BOLD}${BLUE}Database name: ${RESET}")" DB_NAME
+            read -p "$(echo -e "${BOLD}${BLUE}Database user: ${RESET}")" DB_USER
+            read -s -p "$(echo -e "${BOLD}${BLUE}Database password: ${RESET}")" DB_PASS
+            echo ""
+            read -p "$(echo -e "${BOLD}${BLUE}Database host [localhost]: ${RESET}")" DB_HOST
+            DB_HOST="${DB_HOST:-localhost}"
+            if [[ "$DB_PASS" == *$'\n'* ]]; then
+                echo -e "${RED}Password must not contain a newline character.${RESET}"
+                return
+            fi
+        fi
+    fi
+
     # Collect restic password
     if [ $BACKUP_TYPE == "incremental" ]; then
         echo ""
@@ -435,6 +475,15 @@ create_backup_from_settings() {
     local lock_timeout="${LOCK_TIMEOUT}"
     # wp-cli phar path, baked in; the script re-resolves PHP itself at run time
     local wp_cli_path="${WP_CLI_PATH}"
+    # Database driver and ( for mysqldump ) credentials. Defaults to wpcli so a
+    # backup created before this knob existed has the same behavior. Credentials
+    # are written into the script via printf %s outside the heredoc so values
+    # containing $ or " survive intact.
+    local db_driver="${DB_DRIVER:-wpcli}"
+    local db_name="${DB_NAME:-}"
+    local db_user="${DB_USER:-}"
+    local db_pass="${DB_PASS:-}"
+    local db_host="${DB_HOST:-localhost}"
 
     # Pull restic password if an incremental backup is defined
     if [ $remote_backup_type == "incremental" ]; then
@@ -742,6 +791,9 @@ domain_path="${backup_path}"
 retention_period=${retention_period}
 rclone_remote="${rclone_remote_name}"
 remote_backup_location="${remote_backup_location}"
+# Database driver: wpcli ( reads wp-config.php ) or mysqldump ( uses the
+# credentials baked further below via printf %s ).
+db_driver="${db_driver}"
 timestamp=\$(date +'%Y-%m-%d %H:%M:%S')
 backup_date=\$(date +'%d-%m-%Y_%H-%M')
 
@@ -773,9 +825,10 @@ run_wp_cli_as() {
     fi
 }
 
-# wp-cli and PHP are only needed for backup types that touch the database. A
-# files-only backup just tars a directory, so skip the guards there.
-if [ "\${type}" != "files" ]; then
+# wp-cli and PHP are only needed when the database step uses the wp-cli driver.
+# A files-only backup or a mysqldump-driven dump does not need them, so skip
+# the guards in those cases.
+if [ "\${type}" != "files" ] && [ "\${db_driver}" != "mysqldump" ]; then
     if [ ! -f "\${wp_cli}" ]; then
         echo "[\${timestamp}] ERROR: wp-cli not found at '\${wp_cli}'. Aborting backup." >> "$LOG_FILE"
         exit 1
@@ -844,6 +897,16 @@ echo "[\${timestamp}] BACK UP STARTED (\${type}): Performing $backup_time $backu
 echo "[\${timestamp}] - Exporting database" >> "$LOG_FILE"
 
 EOF
+
+        # Bake mysqldump credentials into the script when the mysqldump driver
+        # is selected. printf %s avoids any shell interpretation of $, ", \, '
+        # in the password value. The script is chmod 700 ( root-readable only ).
+        if [ "$db_driver" == "mysqldump" ]; then
+            printf 'db_name=%s\n' "$db_name" >> "$script_path"
+            printf 'db_user=%s\n' "$db_user" >> "$script_path"
+            printf 'db_pass=%s\n' "$db_pass" >> "$script_path"
+            printf 'db_host=%s\n' "$db_host" >> "$script_path"
+        fi
 
         # Append to the script based on the backup type
         if [ $remote_backup_type == "incremental" ]; then
@@ -916,15 +979,28 @@ if [ ! -d "\${wp_owner_directory}" ]; then
     sudo chmod 755 "\${wp_owner_directory}"
 fi
 
-# Get the database name and construct the db backup file name and path
-db_name=\$(run_wp_cli_as "\${wp_owner}" config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
-db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
-
-# Export the database with proper permissions
-if ! run_wp_cli_as "\${wp_owner}" db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
-    echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
-    sudo rm -f "\${wp_owner_directory}/\${db_filename}"
-    exit 1
+# Export the database using either wp-cli ( reads wp-config.php ) or mysqldump
+# ( uses the credentials baked at the top of this script ). mysqldump passes
+# credentials via --defaults-extra-file so they never appear in argv.
+if [ "\${db_driver}" = "mysqldump" ]; then
+    db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
+    my_cnf="\${wp_owner_directory}/.bk-\${hash}.cnf"
+    umask 077
+    printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "\${db_user}" "\${db_pass}" "\${db_host}" > "\${my_cnf}"
+    if ! sudo mysqldump --defaults-extra-file="\${my_cnf}" --single-transaction --quick --routines --events --triggers "\${db_name}" > "\${wp_owner_directory}/\${db_filename}"; then
+        echo "[\${timestamp}] ERROR: mysqldump export failed. Aborting backup." >> "$LOG_FILE"
+        sudo rm -f "\${my_cnf}" "\${wp_owner_directory}/\${db_filename}"
+        exit 1
+    fi
+    sudo rm -f "\${my_cnf}"
+else
+    db_name=\$(run_wp_cli_as "\${wp_owner}" config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
+    db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
+    if ! run_wp_cli_as "\${wp_owner}" db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
+        echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
+        sudo rm -f "\${wp_owner_directory}/\${db_filename}"
+        exit 1
+    fi
 fi
 
 echo "[\${timestamp}] - Compressing the database export" >> "$LOG_FILE"
@@ -1057,15 +1133,27 @@ if [[ "\${domain_path}" == */htdocs ]]; then
     wp_config_path="\${domain_path%/htdocs}"
 fi
 
-# Get the database name and construct the db backup file name and path
-db_name=\$(run_wp_cli_as "\${wp_owner}" config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
-db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
-
-# Export the database with proper permissions
-if ! run_wp_cli_as "\${wp_owner}" db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
-    echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
-    sudo rm -f "\${wp_owner_directory}/\${db_filename}"
-    exit 1
+# Export the database using either wp-cli ( reads wp-config.php ) or mysqldump
+# ( uses the credentials baked at the top of this script ).
+if [ "\${db_driver}" = "mysqldump" ]; then
+    db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
+    my_cnf="\${wp_owner_directory}/.bk-\${hash}.cnf"
+    umask 077
+    printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "\${db_user}" "\${db_pass}" "\${db_host}" > "\${my_cnf}"
+    if ! sudo mysqldump --defaults-extra-file="\${my_cnf}" --single-transaction --quick --routines --events --triggers "\${db_name}" > "\${wp_owner_directory}/\${db_filename}"; then
+        echo "[\${timestamp}] ERROR: mysqldump export failed. Aborting backup." >> "$LOG_FILE"
+        sudo rm -f "\${my_cnf}" "\${wp_owner_directory}/\${db_filename}"
+        exit 1
+    fi
+    sudo rm -f "\${my_cnf}"
+else
+    db_name=\$(run_wp_cli_as "\${wp_owner}" config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
+    db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
+    if ! run_wp_cli_as "\${wp_owner}" db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
+        echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
+        sudo rm -f "\${wp_owner_directory}/\${db_filename}"
+        exit 1
+    fi
 fi
 
 if [ \${call_type} == "restore" ]; then
@@ -1286,10 +1374,20 @@ print_repeat_hint() {
     # Emit a placeholder rather than the real restic password, so copying this
     # command into a script or shell history does not leak the secret.
     [ "$BACKUP_TYPE" == "incremental" ] && hint+=" --password \"<your-restic-password>\""
+    # mysqldump-driven backups need their own credentials; same placeholder
+    # treatment for the password.
+    if [ "${DB_DRIVER:-wpcli}" == "mysqldump" ]; then
+        hint+=" --db-driver \"mysqldump\""
+        hint+=" --db-name \"$DB_NAME\""
+        hint+=" --db-user \"$DB_USER\""
+        hint+=" --db-pass \"<your-db-password>\""
+        [ -n "$DB_HOST" ] && [ "$DB_HOST" != "localhost" ] && hint+=" --db-host \"$DB_HOST\""
+    fi
     hint+=" --yes"
 
     echo -e "${BOLD}To create this backup again ( or script it ), run:${RESET}"
     echo -e "${GREEN}${hint}${RESET}"
     [ "$BACKUP_TYPE" == "incremental" ] && echo -e "${YELLOW}Replace <your-restic-password> with the password you set for this backup.${RESET}"
+    [ "${DB_DRIVER:-wpcli}" == "mysqldump" ] && echo -e "${YELLOW}Replace <your-db-password> with the database password you supplied.${RESET}"
     echo ""
 }

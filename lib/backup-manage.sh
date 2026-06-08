@@ -639,16 +639,34 @@ manage_automated_backups() {
 
                 # A files-only backup has no database to import - the archive
                 # is just the directory contents. Skip the DB import step for
-                # those entries; everything below is wp-cli-driven.
+                # those entries.
                 if [ "$selected_backup_type" != "files" ]; then
                     # Show a db import notice
                     echo ""
                     echo -e "${YELLOW}Importing the database ...${RESET}"
-                    # Now import the database using wp cli and delete it afterwards
-                    local wp_owner=$(sudo stat -c "%U" ${selected_backup_path})                                                # get WordPress folder owner
                     local sql_file=$(find "$selected_backup_path" -type f -name "*${selected_backup_hash}_*.sql" -print -quit) # find the sql file path
-                    run_wp_cli_as "${wp_owner}" db import "${sql_file}" --path="${selected_backup_path}" --skip-plugins --skip-themes          # import db
-                    sudo rm "${sql_file}"                                                                                      # Delete the SQL file after it's been imported
+
+                    # Dispatch on the database driver baked into the backup
+                    # script. Legacy scripts that pre-date this knob have no
+                    # db_driver= line, so we default to wpcli for them.
+                    local backup_db_driver=$(grep -oP 'db_driver="\K[^"]+' "$selected_backup_script" 2>/dev/null)
+                    [ -z "$backup_db_driver" ] && backup_db_driver="wpcli"
+
+                    if [ "$backup_db_driver" == "mysqldump" ]; then
+                        local backup_db_name=$(grep -oP '^db_name=\K.*' "$selected_backup_script")
+                        local backup_db_user=$(grep -oP '^db_user=\K.*' "$selected_backup_script")
+                        local backup_db_pass=$(grep -oP '^db_pass=\K.*' "$selected_backup_script")
+                        local backup_db_host=$(grep -oP '^db_host=\K.*' "$selected_backup_script")
+                        local my_cnf=$(mktemp)
+                        chmod 600 "$my_cnf"
+                        printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "$backup_db_user" "$backup_db_pass" "$backup_db_host" > "$my_cnf"
+                        sudo mysql --defaults-extra-file="$my_cnf" "$backup_db_name" < "$sql_file"
+                        rm -f "$my_cnf"
+                    else
+                        local wp_owner=$(sudo stat -c "%U" ${selected_backup_path})                                                # get WordPress folder owner
+                        run_wp_cli_as "${wp_owner}" db import "${sql_file}" --path="${selected_backup_path}" --skip-plugins --skip-themes          # import db
+                    fi
+                    sudo rm "${sql_file}"                                                                                          # Delete the SQL file after it's been imported
                 fi
 
                 clear_screen "force"

@@ -28,6 +28,12 @@ Conditional / optional:
   --exclude    <list>     comma-separated paths, or "none"; omit to
                           auto-detect cache / junk folders
   --password   <pass>     required for --type incremental
+  --db-driver  <drv>      wpcli ( default; reads wp-config.php ) or mysqldump
+                          ( for non-WP databases or when wp-cli is unavailable )
+  --db-name    <name>     required when --db-driver mysqldump
+  --db-user    <user>     required when --db-driver mysqldump
+  --db-pass    <pass>     required when --db-driver mysqldump
+  --db-host    <host>     mysqldump host ( default: localhost )
   --no-initial            don't run the first backup now; let the schedule
                           take it ( default: run the first backup immediately )
   --yes                   assume yes to confirmations
@@ -41,7 +47,8 @@ run_headless() {
     BACKUP_DOMAIN="" BACKUP_TYPE="" BACKUP_FREQUENCY="" BACKUP_DAY=""
     BACKUP_TIME="" RETENTION_PERIOD="" BACKUP_REMOTE="" REMOTE_BACKUP_LOCATION=""
     BACKUP_PASS="" EXCLUDED_ITEMS="" ASSUME_YES=false SKIP_INITIAL=false
-    local hl_path="" hl_day="" hl_exclude_set=false
+    DB_DRIVER="wpcli" DB_NAME="" DB_USER="" DB_PASS="" DB_HOST="localhost"
+    local hl_path="" hl_day="" hl_exclude_set=false hl_db_driver_set=false
     local flag val
 
     # --- parse --flag value arguments ---
@@ -62,7 +69,7 @@ run_headless() {
             shift
             continue
             ;;
-        --domain | --path | --type | --frequency | --day | --time | --retention | --remote | --location | --exclude | --password)
+        --domain | --path | --type | --frequency | --day | --time | --retention | --remote | --location | --exclude | --password | --db-driver | --db-name | --db-user | --db-pass | --db-host)
             if [ $# -lt 2 ]; then
                 headless_usage "option $flag requires a value"
                 return 2
@@ -90,6 +97,14 @@ run_headless() {
             hl_exclude_set=true
             ;;
         --password) BACKUP_PASS="$val" ;;
+        --db-driver)
+            DB_DRIVER="$val"
+            hl_db_driver_set=true
+            ;;
+        --db-name) DB_NAME="$val" ;;
+        --db-user) DB_USER="$val" ;;
+        --db-pass) DB_PASS="$val" ;;
+        --db-host) DB_HOST="$val" ;;
         esac
     done
 
@@ -140,6 +155,35 @@ run_headless() {
             return 2
         fi
     fi
+
+    # --- database driver validation ---
+    # incremental and files do not use the database driver knob.
+    if [[ "$BACKUP_TYPE" == "files" || "$BACKUP_TYPE" == "incremental" ]]; then
+        if [ "$hl_db_driver_set" == true ] && [ "$DB_DRIVER" != "wpcli" ]; then
+            headless_usage "--db-driver is not valid with --type $BACKUP_TYPE"
+            return 2
+        fi
+        if [ -n "$DB_NAME$DB_USER$DB_PASS" ] || [ "$DB_HOST" != "localhost" ]; then
+            headless_usage "--db-name / --db-user / --db-pass / --db-host are not valid with --type $BACKUP_TYPE"
+            return 2
+        fi
+    fi
+    case "$DB_DRIVER" in
+    wpcli) ;;
+    mysqldump)
+        [ -n "$DB_NAME" ] || { headless_usage "--db-name is required when --db-driver mysqldump"; return 2; }
+        [ -n "$DB_USER" ] || { headless_usage "--db-user is required when --db-driver mysqldump"; return 2; }
+        [ -n "$DB_PASS" ] || { headless_usage "--db-pass is required when --db-driver mysqldump"; return 2; }
+        if [[ "$DB_PASS" == *$'\n'* ]]; then
+            headless_usage "--db-pass must not contain a newline"
+            return 2
+        fi
+        ;;
+    *)
+        headless_usage "--db-driver must be wpcli or mysqldump"
+        return 2
+        ;;
+    esac
 
     # --- day: required for weekly / monthly, not allowed for daily ---
     case "$BACKUP_FREQUENCY" in
@@ -213,7 +257,10 @@ run_headless() {
         fi
         hl_path="${hl_path%/}"
         local resolved
-        if [ "$BACKUP_TYPE" == "files" ]; then
+        # For --type files or for any type using the mysqldump driver, --path
+        # can be any directory ( no wp-config.php required ). The wpcli driver
+        # ( default ) on database/full/incremental still requires a WP install.
+        if [ "$BACKUP_TYPE" == "files" ] || [ "$DB_DRIVER" == "mysqldump" ]; then
             if [ ! -d "$hl_path" ]; then
                 headless_usage "directory '$hl_path' does not exist"
                 return 2
