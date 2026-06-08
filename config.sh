@@ -188,11 +188,17 @@ else
   exit 1
 fi
 
-# Verify wp-cli can run. Standard servers use wp directly; Plesk and cPanel may
-# need an explicit PHP binary because no `php` command is exposed on PATH.
-if ! run_wp_cli cli version --allow-root &>/dev/null; then
-  echo -e "${RED}2b. wp-cli could not run - it needs PHP. Install php-cli, or make${RESET}"
-  echo -e "${RED}    sure /opt/plesk/php/*/bin/php ( Plesk ) or${RESET}"
+# Verify wp-cli can run end-to-end. `wp --info` is the broadest sanity test:
+# it works on every wp-cli version we support, does not require --allow-root
+# on modern releases ( it is purely diagnostic ), and exercises the same
+# PHP-resolution path a real backup would use. `cli version --allow-root` is
+# kept as a fallback for older / stricter wp-cli builds.
+if ! run_wp_cli --info &>/dev/null && ! run_wp_cli cli version --allow-root &>/dev/null; then
+  echo -e "${RED}2b. wp-cli could not run.${RESET}"
+  echo -e "${RED}    Sanity-check on this server: run ${RESET}${BOLD}wp --info${RESET}${RED} as the same${RESET}"
+  echo -e "${RED}    user that runs this script and confirm PHP is reported.${RESET}"
+  echo -e "${RED}    If PHP is missing, install php-cli, or make sure${RESET}"
+  echo -e "${RED}    /opt/plesk/php/*/bin/php ( Plesk ) or${RESET}"
   echo -e "${RED}    /opt/cpanel/ea-php*/root/usr/bin/php ( cPanel ) exists.${RESET}"
   echo ""
   exit 1
