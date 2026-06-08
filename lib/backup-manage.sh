@@ -24,6 +24,7 @@ manage_automated_backups() {
     declare -a backup_statuses
     declare -a backup_scripts
     declare -a backup_types
+    declare -a backup_type_labels
     declare -a backup_cron_expressions
     declare -a backup_hashes
     declare -a backup_names
@@ -106,10 +107,22 @@ manage_automated_backups() {
                 display_schedule="$schedule_label"
             fi
 
+            # Build a friendly display label. The mysqldump driver gets an
+            # explicit suffix so users can tell at a glance which database
+            # backend a database/full backup is using. wpcli is the default
+            # and stays implicit to keep the listing tidy.
+            local baked_driver=$(grep -oP 'db_driver="\K[^"]+' "$script_file" 2>/dev/null)
+            local display_backup_type="$backup_type"
+            if [[ "$backup_type" == "database" || "$backup_type" == "full" ]] \
+                && [ "$baked_driver" == "mysqldump" ]; then
+                display_backup_type="${backup_type} (mysqldump)"
+            fi
+
             # Store the extracted details in arrays
             backup_statuses+=("$backup_status")
             backup_scripts+=("$script_file")
             backup_types+=("$backup_type")
+            backup_type_labels+=("$display_backup_type")
             backup_cron_expressions+=("$cron_expression")
             backup_hashes+=("$backup_hash")
             backup_names+=("${backup_domain} ${backup_frequency} backup at ${backup_time} to ${rclone_remote}")
@@ -140,7 +153,7 @@ manage_automated_backups() {
                 bullet="${YELLOW}●${RESET}"
             fi
             index=$((i + 1)) # Increment the index by 1
-            echo -e "$bullet $index. ${backup_names[i]} [${backup_types[i]}]"
+            echo -e "$bullet $index. ${backup_names[i]} [${backup_type_labels[i]}]"
         done
 
         # Ask the user to select a backup for detailed management
@@ -170,6 +183,7 @@ manage_automated_backups() {
     local selected_backup_status="${backup_statuses[selected_backup_index]}"
     local selected_backup_script="${backup_scripts[selected_backup_index]}"
     local selected_backup_type="${backup_types[selected_backup_index]}"
+    local selected_backup_type_label="${backup_type_labels[selected_backup_index]}"
     local selected_backup_cron_expression="${backup_cron_expressions[selected_backup_index]}"
     local selected_backup_hash="${backup_hashes[selected_backup_index]}"
     local selected_backup_name="${backup_names[selected_backup_index]}"
@@ -192,7 +206,7 @@ manage_automated_backups() {
     else
         echo -e "${BOLD}Backup Status:${RESET} ${YELLOW}$selected_backup_status${RESET}"
     fi
-    echo -e "${BOLD}Backup Type:${RESET} ${BLUE}$selected_backup_type${RESET}"
+    echo -e "${BOLD}Backup Type:${RESET} ${BLUE}$selected_backup_type_label${RESET}"
     echo -e "${BOLD}Backup ID:${RESET} $selected_backup_hash"
     echo -e "${BOLD}Backup Name:${RESET} ${RESET} $selected_backup_name"
     echo -e "${BOLD}Backup Schedule:${RESET} $selected_backup_schedule"
@@ -653,10 +667,13 @@ manage_automated_backups() {
                     [ -z "$backup_db_driver" ] && backup_db_driver="wpcli"
 
                     if [ "$backup_db_driver" == "mysqldump" ]; then
-                        local backup_db_name=$(grep -oP '^db_name=\K.*' "$selected_backup_script")
-                        local backup_db_user=$(grep -oP '^db_user=\K.*' "$selected_backup_script")
-                        local backup_db_pass=$(grep -oP '^db_pass=\K.*' "$selected_backup_script")
-                        local backup_db_host=$(grep -oP '^db_host=\K.*' "$selected_backup_script")
+                        # Credentials are stored base64-encoded ( see the bake
+                        # site in lib/backup-create.sh ) so any byte sequence
+                        # in the password survives. Decode them here.
+                        local backup_db_name=$(grep -oP '^db_name_b64=\K.*' "$selected_backup_script" | base64 -d)
+                        local backup_db_user=$(grep -oP '^db_user_b64=\K.*' "$selected_backup_script" | base64 -d)
+                        local backup_db_pass=$(grep -oP '^db_pass_b64=\K.*' "$selected_backup_script" | base64 -d)
+                        local backup_db_host=$(grep -oP '^db_host_b64=\K.*' "$selected_backup_script" | base64 -d)
                         local my_cnf=$(mktemp)
                         chmod 600 "$my_cnf"
                         printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "$backup_db_user" "$backup_db_pass" "$backup_db_host" > "$my_cnf"

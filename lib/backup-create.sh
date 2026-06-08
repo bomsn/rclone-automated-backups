@@ -500,6 +500,24 @@ create_backup_from_settings() {
         backup_path=$(resolve_domain_path "$backup_domain")
     fi
 
+    # Pre-flight: catch invalid combinations BEFORE writing the script, so the
+    # user does not discover a misconfiguration only when the first cron run
+    # logs an error. Combinations that require a WordPress install:
+    #   - type incremental ( always wp-cli driven )
+    #   - type full or database with db_driver wpcli ( reads wp-config.php )
+    # The files type and the mysqldump driver have no WP requirement.
+    if [[ "$remote_backup_type" == "incremental" ]] \
+        || ( [[ "$remote_backup_type" == "full" || "$remote_backup_type" == "database" ]] && [ "$db_driver" == "wpcli" ] ); then
+        if [ -z "$(derive_wp_path "$backup_path")" ]; then
+            [ "$mode" == "interactive" ] && clear_screen "force"
+            echo -e "${RED}The chosen combination requires a WordPress install at '${backup_path}'${RESET}" >&2
+            echo -e "${RED}( type=${remote_backup_type}, db-driver=${db_driver} ), but no wp-config.php was found.${RESET}" >&2
+            echo -e "${YELLOW}Options: use --type files ( files-only backup of any directory ), or use${RESET}" >&2
+            echo -e "${YELLOW}--db-driver mysqldump with explicit --db-name / --db-user / --db-pass.${RESET}" >&2
+            return 1
+        fi
+    fi
+
     # Validate and sanitize backup_frequency
     if [ -z "$backup_frequency" ] || [[ ! "$backup_frequency" =~ ^(daily|weekly|monthly)$ ]]; then
         [ "$mode" == "interactive" ] && clear_screen "force"
@@ -899,13 +917,23 @@ echo "[\${timestamp}] - Exporting database" >> "$LOG_FILE"
 EOF
 
         # Bake mysqldump credentials into the script when the mysqldump driver
-        # is selected. printf %s avoids any shell interpretation of $, ", \, '
-        # in the password value. The script is chmod 700 ( root-readable only ).
+        # is selected. Values are stored base64-encoded so any byte sequence -
+        # including ", ', $, \, =, spaces, control chars - survives both bash
+        # parsing of the assignment line AND grep extraction at restore time.
+        # The script is chmod 700 ( root-readable only ).
         if [ "$db_driver" == "mysqldump" ]; then
-            printf 'db_name=%s\n' "$db_name" >> "$script_path"
-            printf 'db_user=%s\n' "$db_user" >> "$script_path"
-            printf 'db_pass=%s\n' "$db_pass" >> "$script_path"
-            printf 'db_host=%s\n' "$db_host" >> "$script_path"
+            printf 'db_name_b64=%s\n' "$(printf '%s' "$db_name" | base64 -w0)" >> "$script_path"
+            printf 'db_user_b64=%s\n' "$(printf '%s' "$db_user" | base64 -w0)" >> "$script_path"
+            printf 'db_pass_b64=%s\n' "$(printf '%s' "$db_pass" | base64 -w0)" >> "$script_path"
+            printf 'db_host_b64=%s\n' "$(printf '%s' "$db_host" | base64 -w0)" >> "$script_path"
+            # Decode into runtime vars so the dispatch branches can reference
+            # them by their plain names just like any other baked variable.
+            cat >> "$script_path" <<'CREDS_DECODE'
+db_name=$(printf '%s' "$db_name_b64" | base64 -d)
+db_user=$(printf '%s' "$db_user_b64" | base64 -d)
+db_pass=$(printf '%s' "$db_pass_b64" | base64 -d)
+db_host=$(printf '%s' "$db_host_b64" | base64 -d)
+CREDS_DECODE
         fi
 
         # Append to the script based on the backup type
