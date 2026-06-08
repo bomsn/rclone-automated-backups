@@ -45,6 +45,19 @@ BLUE="\e[34m"
 BLUE_BG="\e[44m"
 RESET="\e[0m" # Reset text formatting
 
+# Widen PATH so wp-cli's "#!/usr/bin/env php" shebang can find a PHP binary
+# even when sudo's secure_path strips /usr/local/bin and the cPanel directories.
+# This is purely additive - existing PATH entries are preserved with higher
+# priority, and missing directories are silently skipped.
+for _extra_bin in /usr/local/sbin /usr/local/bin /opt/cpanel/ea-php*/root/usr/bin; do
+    [ -d "$_extra_bin" ] && case ":$PATH:" in
+        *":$_extra_bin:"*) ;;
+        *) PATH="$PATH:$_extra_bin" ;;
+    esac
+done
+export PATH
+unset _extra_bin
+
 # Resolve the directory this script lives in, so the lib/ modules load regardless
 # of the current working directory.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -195,11 +208,14 @@ fi
 # kept as a fallback for older / stricter wp-cli builds.
 if ! run_wp_cli --info &>/dev/null && ! run_wp_cli cli version --allow-root &>/dev/null; then
   echo -e "${RED}2b. wp-cli could not run.${RESET}"
-  echo -e "${RED}    Sanity-check on this server: run ${RESET}${BOLD}wp --info${RESET}${RED} as the same${RESET}"
-  echo -e "${RED}    user that runs this script and confirm PHP is reported.${RESET}"
-  echo -e "${RED}    If PHP is missing, install php-cli, or make sure${RESET}"
-  echo -e "${RED}    /opt/plesk/php/*/bin/php ( Plesk ) or${RESET}"
-  echo -e "${RED}    /opt/cpanel/ea-php*/root/usr/bin/php ( cPanel ) exists.${RESET}"
+  echo -e "${YELLOW}    Resolved wp-cli path: ${WP_CLI_PATH:-<none>}${RESET}"
+  echo -e "${YELLOW}    Resolved PHP binary:  ${WP_PHP_BIN:-<PATH php>}${RESET}"
+  echo -e "${YELLOW}    PATH seen by script:  $PATH${RESET}"
+  echo -e "${YELLOW}    Actual error from the test command follows:${RESET}"
+  run_wp_cli --info 2>&1 | sed 's/^/      /'
+  echo -e "${RED}    Run ${RESET}${BOLD}wp --info${RESET}${RED} directly as the same user that runs this${RESET}"
+  echo -e "${RED}    script. If that works but the script still fails, paste the${RESET}"
+  echo -e "${RED}    diagnostic block above.${RESET}"
   echo ""
   exit 1
 fi
