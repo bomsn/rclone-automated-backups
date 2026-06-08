@@ -39,8 +39,9 @@ manage_automated_backups() {
         if [ -f "$script_file" ]; then
 
             local script_filename=$(echo "$(basename "$script_file")")
-            # Check if there is line with our script name in the cron file
-            local backup_schedule_line=$(grep -E ".*$script_filename" "$CRON_FILE" | grep -oP '(\S+ ){4}\S+')
+            # Check if there is a line with our script name in either the current
+            # or the legacy cron file ( back-compat after the repo rename ).
+            local backup_schedule_line=$(grep -hE ".*$script_filename" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null | grep -oP '(\S+ ){4}\S+' | head -n1)
 
             # Check if a valid line was found
             local backup_status="Inactive"
@@ -217,9 +218,11 @@ manage_automated_backups() {
         select choice in "${options[@]}"; do
             case "$choice" in
             "Disable")
-                # Construct the cron pattern and remove the associated cron line from the specified cron file
+                # Construct the cron pattern and remove the associated cron line from
+                # whichever cron file holds it ( current or legacy ).
                 cron_pattern="^${selected_backup_cron_expression//\*/\\*} .*$(basename "$selected_backup_script")"
-                sudo sed -i "/$cron_pattern/d" "$CRON_FILE"
+                [ -f "$CRON_FILE" ] && sudo sed -i "/$cron_pattern/d" "$CRON_FILE"
+                [ -f "$COMPAT_CRON_FILE" ] && sudo sed -i "/$cron_pattern/d" "$COMPAT_CRON_FILE"
 
                 restore_cursor_position "alt"
                 clear_screen "force"
@@ -255,9 +258,11 @@ manage_automated_backups() {
                     # Remove the backup script file
                     sudo rm -f "$selected_backup_script"
 
-                    # Construct the cron pattern and remove the associated cron line from the specified cron file
+                    # Construct the cron pattern and remove the associated cron line from
+                    # whichever cron file holds it ( current or legacy ).
                     cron_pattern="^${selected_backup_cron_expression//\*/\\*} .*$(basename "$selected_backup_script")"
-                    sudo sed -i "/$cron_pattern/d" "$CRON_FILE"
+                    [ -f "$CRON_FILE" ] && sudo sed -i "/$cron_pattern/d" "$CRON_FILE"
+                    [ -f "$COMPAT_CRON_FILE" ] && sudo sed -i "/$cron_pattern/d" "$COMPAT_CRON_FILE"
 
                     clear_screen "force"
                     echo -e "${BOLD}${GREEN}'$selected_backup_name'${RESET} ${GREEN}has been deleted successfully.${RESET}"

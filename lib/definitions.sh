@@ -77,7 +77,9 @@ update_definitions_state() {
 persist_new_domain() {
     local new_domain="$1"
     local new_path="$2"
-    local lock_file="/tmp/rclone-automated-backups-by-alikhallad-definitions.lock"
+    # Only one config.sh exists on disk at a time, so a single lock file is
+    # sufficient ( no compat lock needed after the rename ).
+    local lock_file="/tmp/rclone-automated-backups-definitions.lock"
     local i exists=false
 
     exec 9>"$lock_file"

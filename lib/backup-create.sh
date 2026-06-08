@@ -812,12 +812,19 @@ if [ "\${call_type}" = "backup" ] && [ "\${schedule}" = "monthly-last" ] && [ "\
 fi
 
 # --- Serialize backup runs across all sites ( prevents server overload ) ---
-# Acquire a shared lock so that, however many cron entries fire together, the
-# heavy work ( tar / rclone / restic ) runs strictly one site at a time.
+# Acquire shared locks so that, however many cron entries fire together, the
+# heavy work ( tar / rclone / restic ) runs strictly one site at a time. Two
+# lock files are used: the current one and the legacy "-by-alikhallad" one
+# from before the rename. Old scripts ( generated before the rename ) only
+# lock the legacy file; this script locks both, so we mutually exclude with
+# old in-flight scripts via the shared legacy file and with peer new scripts
+# via either file. The order ( COMPAT then NEW ) is fixed across every caller
+# to prevent AB-BA deadlock.
+exec {lock_fd_compat}>"$COMPAT_LOCK_FILE"
 exec {lock_fd}>"$LOCK_FILE"
-if ! flock -n "\${lock_fd}"; then
+if ! flock -n "\${lock_fd_compat}" || ! flock -n "\${lock_fd}"; then
     echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP QUEUED (\${type}): waiting for another backup to finish for '\${domain}'" >> "$LOG_FILE"
-    if ! flock -w $lock_timeout "\${lock_fd}"; then
+    if ! flock -w $lock_timeout "\${lock_fd_compat}" || ! flock -w $lock_timeout "\${lock_fd}"; then
         echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP SKIPPED (\${type}): lock busy, timed out for '\${domain}'" >> "$LOG_FILE"
         # A pre-restore backup that cannot run must fail so the caller aborts the
         # restore; a scheduled run just skips this cycle without an alert.
@@ -1109,9 +1116,11 @@ EOF
             sudo touch "$CRON_FILE"     # Create the cron file
             sudo chmod 644 "$CRON_FILE" # Ensure the file has the correct permissions
         fi
-        # Add the cron job, unless an identical entry ( or one for the same script ) already exists
+        # Add the cron job, unless an identical entry ( or one for the same script )
+        # already exists in either the current or legacy cron file.
         local cron_line="$cron_expression root /bin/bash $PWD/$script_path"
-        if grep -Fqx "$cron_line" "$CRON_FILE" 2>/dev/null || grep -Fq "$(basename "$script_path")" "$CRON_FILE" 2>/dev/null; then
+        if grep -Fqx "$cron_line" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null \
+            || grep -Fq "$(basename "$script_path")" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null; then
             echo -e "${YELLOW}A cron entry for this backup already exists, skipping cron update.${RESET}"
         else
             echo "$cron_line" >>"$CRON_FILE"

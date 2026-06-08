@@ -1,6 +1,6 @@
-## Rclone Automated Backups for WordPress
+## Rclone Automated Backups
 
-Automate WordPress backups to various cloud storage providers using rclone automation. Create full-site, database-only, or `restic`-based incremental backups on a daily, weekly, or monthly schedule.
+Automate backups of WordPress sites — and arbitrary server directories — to various cloud storage providers using rclone automation. Create full-site, database-only, or `restic`-based incremental backups on a daily, weekly, or monthly schedule.
 
 ![Screenshot](/screenshot.png)
 
@@ -23,12 +23,12 @@ Follow these steps to set up automated WordPress backups:
 
 ```shell
 apt-get -y install wget git
-git clone https://github.com/bomsn/rclone-automated-backups-for-wordpress.git rclone-wordpress
+git clone https://github.com/bomsn/rclone-automated-backups.git rclone-backups
 ```
 - Run the initilization script
 
 ```shell
-cd rclone-wordpress
+cd rclone-backups
 sudo bash config.sh
 ```  
 

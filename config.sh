@@ -17,10 +17,19 @@ CRON_SCRIPTS_DIR="cron_scripts"
 TMP_DIR="$PWD/tmp"
 DEFINITIONS_FILE="definitions"
 LOG_FILE="$PWD/backup.log"
-CRON_FILE="/etc/cron.d/rclone-automated-backups-by-alikhallad"
+CRON_FILE="/etc/cron.d/rclone-automated-backups"
 # Shared lock file: every generated backup script grabs this lock so that, no
 # matter how many cron entries fire at once, backups run strictly one-at-a-time.
-LOCK_FILE="/tmp/rclone-automated-backups-by-alikhallad.lock"
+LOCK_FILE="/tmp/rclone-automated-backups.lock"
+# Back-compat constants. The tool was originally called
+# "rclone-automated-backups-for-wordpress" and stored its cron entries and lock
+# file under "-by-alikhallad" paths. After the rename to "rclone-automated-backups"
+# we keep reading and locking against the legacy paths so an existing install
+# that just runs "git pull" keeps its scheduled backups visible and mutually
+# excludes against any in-flight script generated before the rename. Cron reads
+# every file in /etc/cron.d/ so leaving the legacy file in place is harmless.
+COMPAT_CRON_FILE="/etc/cron.d/rclone-automated-backups-by-alikhallad"
+COMPAT_LOCK_FILE="/tmp/rclone-automated-backups-by-alikhallad.lock"
 # How long ( seconds ) a queued backup waits for the shared lock before giving
 # up for this cycle. 18h is long enough for a full nightly queue to drain.
 LOCK_TIMEOUT=64800
