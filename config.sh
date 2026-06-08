@@ -45,19 +45,6 @@ BLUE="\e[34m"
 BLUE_BG="\e[44m"
 RESET="\e[0m" # Reset text formatting
 
-# Widen PATH so wp-cli's "#!/usr/bin/env php" shebang can find a PHP binary
-# even when sudo's secure_path strips /usr/local/bin and the cPanel directories.
-# This is purely additive - existing PATH entries are preserved with higher
-# priority, and missing directories are silently skipped.
-for _extra_bin in /usr/local/sbin /usr/local/bin /opt/cpanel/ea-php*/root/usr/bin; do
-    [ -d "$_extra_bin" ] && case ":$PATH:" in
-        *":$_extra_bin:"*) ;;
-        *) PATH="$PATH:$_extra_bin" ;;
-    esac
-done
-export PATH
-unset _extra_bin
-
 # Resolve the directory this script lives in, so the lib/ modules load regardless
 # of the current working directory.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -73,6 +60,14 @@ source "$SCRIPT_DIR/lib/notifications.sh"
 source "$SCRIPT_DIR/lib/menu.sh"
 source "$SCRIPT_DIR/lib/headless.sh"
 
+# True when the given php binary is the CLI SAPI, false for cgi-fcgi / fpm /
+# anything else. wp-cli refuses to run under non-cli SAPIs ( cPanel's
+# /usr/local/bin/php is cgi-fcgi, for example ), so we must validate before
+# accepting a candidate.
+_is_cli_php() {
+  [ -x "$1" ] && "$1" -v 2>/dev/null | head -1 | grep -q '(cli)'
+}
+
 resolve_wp_cli_runtime() {
   WP_CLI_PATH=""
   WP_PHP_BIN=""
@@ -85,7 +80,13 @@ resolve_wp_cli_runtime() {
     return 1
   fi
 
-  if command -v php &>/dev/null; then
+  # If the php on PATH is the CLI SAPI we can leave WP_PHP_BIN empty and let
+  # wp's "#!/usr/bin/env php" shebang find it. Otherwise we MUST pick an
+  # explicit CLI binary, because env would otherwise hand wp a cgi-fcgi php
+  # ( the common case on cPanel ) and wp-cli would refuse to run.
+  local php_on_path=""
+  command -v php &>/dev/null && php_on_path="$(command -v php)"
+  if [ -n "$php_on_path" ] && _is_cli_php "$php_on_path"; then
     return 0
   fi
 
@@ -94,7 +95,7 @@ resolve_wp_cli_runtime() {
     $(find /opt/plesk/php -mindepth 3 -maxdepth 3 -path '*/bin/php' -type f -perm -111 2>/dev/null | sort -Vr) \
     $(find /opt/cpanel -mindepth 5 -maxdepth 5 -path '*/ea-php*/root/usr/bin/php' -type f -perm -111 2>/dev/null | sort -Vr) \
     /usr/local/bin/php /usr/bin/php; do
-    if [ -x "$php_candidate" ]; then
+    if _is_cli_php "$php_candidate"; then
       WP_PHP_BIN="$php_candidate"
       return 0
     fi
@@ -207,15 +208,9 @@ fi
 # PHP-resolution path a real backup would use. `cli version --allow-root` is
 # kept as a fallback for older / stricter wp-cli builds.
 if ! run_wp_cli --info &>/dev/null && ! run_wp_cli cli version --allow-root &>/dev/null; then
-  echo -e "${RED}2b. wp-cli could not run.${RESET}"
-  echo -e "${YELLOW}    Resolved wp-cli path: ${WP_CLI_PATH:-<none>}${RESET}"
-  echo -e "${YELLOW}    Resolved PHP binary:  ${WP_PHP_BIN:-<PATH php>}${RESET}"
-  echo -e "${YELLOW}    PATH seen by script:  $PATH${RESET}"
-  echo -e "${YELLOW}    Actual error from the test command follows:${RESET}"
-  run_wp_cli --info 2>&1 | sed 's/^/      /'
-  echo -e "${RED}    Run ${RESET}${BOLD}wp --info${RESET}${RED} directly as the same user that runs this${RESET}"
-  echo -e "${RED}    script. If that works but the script still fails, paste the${RESET}"
-  echo -e "${RED}    diagnostic block above.${RESET}"
+  echo -e "${RED}2b. wp-cli could not run - no usable PHP CLI binary was found.${RESET}"
+  echo -e "${RED}    Install php-cli, or make sure /opt/plesk/php/*/bin/php ( Plesk )${RESET}"
+  echo -e "${RED}    or /opt/cpanel/ea-php*/root/usr/bin/php ( cPanel ) exists.${RESET}"
   echo ""
   exit 1
 fi

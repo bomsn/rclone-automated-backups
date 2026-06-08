@@ -837,21 +837,31 @@ timestamp=\$(date +'%Y-%m-%d %H:%M:%S')
 backup_date=\$(date +'%d-%m-%Y_%H-%M')
 
 # Resolve how to run wp-cli. Standard servers run wp directly; Plesk and cPanel
-# may need an explicit PHP binary because no php command is exposed on PATH.
+# may need an explicit PHP binary because no php command is exposed on PATH, or
+# ( cPanel's case ) the php on PATH is cgi-fcgi and wp-cli rejects it. We always
+# require the CLI SAPI - "(cli)" must appear in php -v's first line.
 wp_cli="${wp_cli_path}"
 wp_php=""
-if ! command -v php >/dev/null 2>&1; then
+_is_cli_php() {
+    [ -x "\$1" ] && "\$1" -v 2>/dev/null | head -1 | grep -q '(cli)'
+}
+php_on_path=""
+command -v php >/dev/null 2>&1 && php_on_path=\$(command -v php)
+if [ -n "\${php_on_path}" ] && _is_cli_php "\${php_on_path}"; then
+    : # PATH php is CLI - leave wp_php empty so wp's shebang finds it
+else
     php_candidates=""
     php_candidates="\${php_candidates} \$(find /opt/plesk/php -mindepth 3 -maxdepth 3 -path '*/bin/php' -type f -perm -111 2>/dev/null | sort -Vr)"
     php_candidates="\${php_candidates} \$(find /opt/cpanel -mindepth 5 -maxdepth 5 -path '*/ea-php*/root/usr/bin/php' -type f -perm -111 2>/dev/null | sort -Vr)"
     php_candidates="\${php_candidates} /usr/local/bin/php /usr/bin/php"
     for php_candidate in \${php_candidates}; do
-        if [ -x "\${php_candidate}" ]; then
+        if _is_cli_php "\${php_candidate}"; then
             wp_php="\${php_candidate}"
             break
         fi
     done
 fi
+unset -f _is_cli_php
 
 run_wp_cli_as() {
     local wp_user="\$1"
