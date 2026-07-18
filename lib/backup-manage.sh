@@ -487,7 +487,7 @@ manage_automated_backups() {
                     if [ "$RESTORE_MODE" == "origin" ]; then
                         echo -e "${BOLD}${YELLOW}NOTE: ${RESET}${YELLOW}This overwrites the live database for '${selected_backup_domain}'. Site files are NOT touched.${RESET}"
                     else
-                        echo -e "${BOLD}${YELLOW}NOTE: ${RESET}${YELLOW}This imports into the staging database at '${RESTORE_TARGET_PATH}'. The live site is NOT touched.${RESET}"
+                        echo -e "${BOLD}${YELLOW}NOTE: ${RESET}${YELLOW}This imports into the target database at '${RESTORE_TARGET_PATH}'. The source ( live ) site is NOT touched.${RESET}"
                     fi
                     read -p "$(echo -e "${BOLD}${BLUE}Proceed with the database restore? (y/n)${RESET} ${BLUE}( or q to go back ): ${RESET}")" db_restore_confirm
 

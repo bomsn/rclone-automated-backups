@@ -2,22 +2,49 @@
 
 # Restore-destination resolution for the "View/restore remote backups" flow.
 #
-# Every restore either lands on the ORIGIN ( live ) site — today's behaviour,
-# preserved byte-for-byte — or on a STAGING target the operator names at restore
-# time. Staging mode redirects every file write and the database import to a path
+# Every restore either lands on the SOURCE ( live ) site — today's behaviour,
+# preserved byte-for-byte — or on ANOTHER path/site the operator names at restore
+# time. The latter redirects every file write and the database import to a path
 # and DB the operator specifies, and refuses to run if the resolved target
-# collides with the origin path or origin database. This is what lets a backup be
-# test-restored without any risk of clobbering the live site.
+# collides with the source path or source database. This is what lets a backup be
+# restored elsewhere ( a test copy, or a different site ) without any risk of
+# clobbering the live one.
 #
-# The functions here set RESTORE_* globals that lib/backup-manage.sh consumes:
+# The functions here set RESTORE_* globals that lib/backup-manage.sh consumes.
+# RESTORE_MODE uses the internal token "staging" for the "another path/site" case:
 #   RESTORE_MODE              origin | staging
 #   RESTORE_TARGET_PATH       effective files directory the restore writes into
 #   RESTORE_DB_MODE           origin | wpconfig | explicit | none
-#   RESTORE_DB_NAME/USER/PASS/HOST   explicit staging DB credentials
-#   RESTORE_URL_NEW           URL to stamp on the staged copy after import
-#   RESTORE_URL_OLD           origin URL found in the imported DB ( set at rewrite )
-#   RESTORE_PRESERVE_WPCONFIG staging wp-config.php to protect across a file restore
+#   RESTORE_DB_NAME/USER/PASS/HOST   explicit target DB credentials
+#   RESTORE_URL_NEW           URL to stamp on the restored copy after import
+#   RESTORE_URL_OLD           source URL found in the imported DB ( set at rewrite )
+#   RESTORE_PRESERVE_WPCONFIG target wp-config.php to protect across a file restore
 #   RESTORE_WPCONFIG_STASH    temp copy of that wp-config ( internal )
+
+# Read DB_NAME straight out of a site's wp-config.php. The database-collision
+# guard MUST NOT depend on wp-cli: on cPanel/Plesk, wp-cli invoked as the site
+# user can pick up that user's cgi-fcgi php and emit an error blob on stdout,
+# which would otherwise be mistaken for a database name. Parsing the literal from
+# wp-config.php is SAPI-independent and reliable. Echoes the name, or nothing.
+wpconfig_db_name() {
+    local wp_dir="${1%/}"
+    local cfg=""
+    if [ -f "$wp_dir/wp-config.php" ]; then
+        cfg="$wp_dir/wp-config.php"
+    elif [ -f "${wp_dir%/htdocs}/wp-config.php" ]; then
+        cfg="${wp_dir%/htdocs}/wp-config.php"
+    else
+        return 0
+    fi
+    # Matches: define( 'DB_NAME', 'value' );  ( any quotes / whitespace )
+    sudo grep -oP "define\(\s*['\"]DB_NAME['\"]\s*,\s*['\"]\K[^'\"]+" "$cfg" 2>/dev/null | head -n1
+}
+
+# True only when the argument looks like an http(s) URL. Used to reject wp-cli
+# error output before it is ever treated as a site URL.
+looks_like_http_url() {
+    [[ "$1" =~ ^https?:// ]]
+}
 
 # Resolve the origin database name so we can guard against a staging target that
 # would overwrite the live database. wpcli backups read it from the origin's
@@ -37,8 +64,7 @@ resolve_origin_db_name() {
     if [ "$driver" == "mysqldump" ]; then
         grep -oP '^db_name_b64=\K.*' "$backup_script" 2>/dev/null | base64 -d 2>/dev/null
     else
-        local owner=$(sudo stat -c "%U" "$origin_path" 2>/dev/null)
-        run_wp_cli_as "$owner" config get DB_NAME --path="$origin_path" --skip-plugins --skip-themes 2>/dev/null
+        wpconfig_db_name "$origin_path"
     fi
 }
 
@@ -67,8 +93,8 @@ select_restore_destination() {
 
     echo ""
     echo -e "${BOLD}Choose a restore destination:${RESET}"
-    echo -e "${BOLD}${YELLOW}1. ${RESET}Origin ( live ) — restore onto ${BOLD}${origin_domain}${RESET} at ${origin_path}"
-    echo -e "${BOLD}${YELLOW}2. ${RESET}Staging target ( test ) — restore to a different path / database you specify"
+    echo -e "${BOLD}${YELLOW}1. ${RESET}Source ( live ) — restore onto ${BOLD}${origin_domain}${RESET} at ${origin_path}"
+    echo -e "${BOLD}${YELLOW}2. ${RESET}Another path / site — restore to a different directory and database you specify"
     read -p "$(echo -e "${BOLD}${BLUE}Enter the number of your choice (1/2)${RESET} ${BLUE}( or q to go back ): ${RESET}")" dest_choice
 
     if [ "${dest_choice,,}" == "q" ]; then
@@ -89,7 +115,7 @@ select_restore_destination() {
     RESTORE_MODE="staging"
 
     local staging_path
-    read -p "$(echo -e "${BOLD}${BLUE}Enter the staging target path${RESET} ${BLUE}( or q to go back ): ${RESET}")" staging_path
+    read -p "$(echo -e "${BOLD}${BLUE}Enter the target path${RESET} ${BLUE}( or q to go back ): ${RESET}")" staging_path
     if [ "${staging_path,,}" == "q" ]; then
         return 1
     fi
@@ -100,11 +126,11 @@ select_restore_destination() {
     staging_path="${staging_path%/}"
 
     if [ -z "$staging_path" ] || [ "$staging_path" == "/" ]; then
-        echo -e "${RED}Refusing to use an empty path or '/' as a staging target.${RESET}"
+        echo -e "${RED}Refusing to use an empty path or '/' as a restore target.${RESET}"
         return 1
     fi
     if [ ! -d "$staging_path" ]; then
-        echo -e "${RED}Staging path '${staging_path}' does not exist or is not a directory. Create it first.${RESET}"
+        echo -e "${RED}Target path '${staging_path}' does not exist or is not a directory. Create it first.${RESET}"
         return 1
     fi
 
@@ -122,7 +148,7 @@ select_restore_destination() {
     if [ "$effective_path" == "$origin_path" ] ||
         [[ "$effective_path" == "$origin_path"/* ]] ||
         [[ "$origin_path" == "$effective_path"/* ]]; then
-        echo -e "${RED}The staging path overlaps the origin path ('${origin_path}'). Aborting to protect the live site.${RESET}"
+        echo -e "${RED}The target path overlaps the source path ('${origin_path}'). Aborting to protect the live site.${RESET}"
         return 1
     fi
     RESTORE_TARGET_PATH="$effective_path"
@@ -138,31 +164,29 @@ select_restore_destination() {
         # The target is a real WordPress install: import into whatever database
         # its own wp-config.php points at, and keep the site's current URL.
         RESTORE_DB_MODE="wpconfig"
-        local owner
-        owner=$(sudo stat -c "%U" "$effective_path" 2>/dev/null)
-        staging_db_name=$(run_wp_cli_as "$owner" config get DB_NAME --path="$effective_path" --skip-plugins --skip-themes 2>/dev/null)
+        staging_db_name=$(wpconfig_db_name "$effective_path")
 
-        # Collision guard: never import into the live database.
+        # Collision guard: never import into the live database. Both names are read
+        # straight from wp-config.php, so this never depends on wp-cli.
         if [ -n "$staging_db_name" ] && [ -n "$origin_db_name" ] && [ "$staging_db_name" == "$origin_db_name" ]; then
-            echo -e "${RED}The staging database ('${staging_db_name}') is the same as the origin database. Aborting to prevent overwriting the live database.${RESET}"
+            echo -e "${RED}The target database ('${staging_db_name}') is the same as the source database. Aborting to prevent overwriting the live database.${RESET}"
             return 1
         fi
 
-        # Capture the staging site's current URL BEFORE the import overwrites it
-        # with the origin's URL. That captured value becomes the URL we rewrite
-        # back to afterwards.
-        RESTORE_URL_NEW=$(run_wp_cli_as "$owner" option get siteurl --path="$effective_path" --skip-plugins --skip-themes 2>/dev/null)
+        # Capture the target site's current URL BEFORE the import overwrites it
+        # with the source's URL. Use the validated root wp-cli runtime, and only
+        # trust a value that actually looks like a URL ( never a wp-cli error blob ).
+        local captured_url=$(run_wp_cli option get siteurl --path="$effective_path" --allow-root --skip-plugins --skip-themes 2>/dev/null)
+        looks_like_http_url "$captured_url" && RESTORE_URL_NEW="$captured_url"
 
-        # If the staging site currently carries the origin's URL, or we could not
-        # read one, ask the operator for a distinct staging URL so the staged
-        # copy never resolves to the live domain.
-        local origin_url=""
-        local origin_owner
-        origin_owner=$(sudo stat -c "%U" "$origin_path" 2>/dev/null)
-        origin_url=$(run_wp_cli_as "$origin_owner" option get siteurl --path="$origin_path" --skip-plugins --skip-themes 2>/dev/null)
+        local origin_url=$(run_wp_cli option get siteurl --path="$origin_path" --allow-root --skip-plugins --skip-themes 2>/dev/null)
+        looks_like_http_url "$origin_url" || origin_url=""
 
+        # If we could not read a target URL, or it currently matches the source's,
+        # ask the operator for a distinct URL so the restored copy never resolves
+        # to the live domain.
         if [ -z "$RESTORE_URL_NEW" ] || { [ -n "$origin_url" ] && [ "$RESTORE_URL_NEW" == "$origin_url" ]; }; then
-            read -p "$(echo -e "${BOLD}${BLUE}Enter the staging URL to use after import ( e.g. https://staging.example.com )${RESET} ${BLUE}( or q to go back ): ${RESET}")" RESTORE_URL_NEW
+            read -p "$(echo -e "${BOLD}${BLUE}Enter the URL to use after import ( e.g. https://staging.example.com )${RESET} ${BLUE}( or q to go back ): ${RESET}")" RESTORE_URL_NEW
             if [ "${RESTORE_URL_NEW,,}" == "q" ] || [ -z "$RESTORE_URL_NEW" ]; then
                 return 1
             fi
@@ -180,30 +204,30 @@ select_restore_destination() {
         # Non-WordPress target ( or a mysqldump backup landing somewhere without a
         # wp-config ): the operator supplies the staging database explicitly.
         RESTORE_DB_MODE="explicit"
-        read -p "$(echo -e "${BOLD}${BLUE}Staging database name${RESET} ${BLUE}( or q to go back ): ${RESET}")" RESTORE_DB_NAME
+        read -p "$(echo -e "${BOLD}${BLUE}Target database name${RESET} ${BLUE}( or q to go back ): ${RESET}")" RESTORE_DB_NAME
         if [ "${RESTORE_DB_NAME,,}" == "q" ] || [ -z "$RESTORE_DB_NAME" ]; then
             return 1
         fi
         if [ -n "$origin_db_name" ] && [ "$RESTORE_DB_NAME" == "$origin_db_name" ]; then
-            echo -e "${RED}That database name matches the origin database. Aborting to protect the live database.${RESET}"
+            echo -e "${RED}That database name matches the source database. Aborting to protect the live database.${RESET}"
             return 1
         fi
-        read -p "$(echo -e "${BOLD}${BLUE}Staging database user: ${RESET}")" RESTORE_DB_USER
-        read -s -p "$(echo -e "${BOLD}${BLUE}Staging database password: ${RESET}")" RESTORE_DB_PASS
+        read -p "$(echo -e "${BOLD}${BLUE}Target database user: ${RESET}")" RESTORE_DB_USER
+        read -s -p "$(echo -e "${BOLD}${BLUE}Target database password: ${RESET}")" RESTORE_DB_PASS
         echo ""
-        read -p "$(echo -e "${BOLD}${BLUE}Staging database host ( default: localhost ): ${RESET}")" RESTORE_DB_HOST
+        read -p "$(echo -e "${BOLD}${BLUE}Target database host ( default: localhost ): ${RESET}")" RESTORE_DB_HOST
         [ -z "$RESTORE_DB_HOST" ] && RESTORE_DB_HOST="localhost"
     fi
 
     # ------------------------------------------------ resolved-summary confirm
     echo ""
     echo -e "${BOLD}${UNDERLINE}Restore destination${RESET}"
-    echo -e "${BOLD}Mode:${RESET}  ${YELLOW}Staging ( test )${RESET}"
+    echo -e "${BOLD}Mode:${RESET}  ${YELLOW}Another path / site${RESET}"
     echo -e "${BOLD}Files ->${RESET} ${RESTORE_TARGET_PATH}"
     case "$RESTORE_DB_MODE" in
     wpconfig)
-        echo -e "${BOLD}DB    ->${RESET} ${staging_db_name:-<from staging wp-config>} ( via staging wp-config )"
-        echo -e "${BOLD}URL   ->${RESET} <origin URL> -> ${RESTORE_URL_NEW} ( applied after import )"
+        echo -e "${BOLD}DB    ->${RESET} ${staging_db_name:-<from target wp-config>} ( via target wp-config )"
+        echo -e "${BOLD}URL   ->${RESET} <source URL> -> ${RESTORE_URL_NEW} ( applied after import )"
         ;;
     explicit)
         echo -e "${BOLD}DB    ->${RESET} ${RESTORE_DB_NAME} ( ${RESTORE_DB_USER}@${RESTORE_DB_HOST} )"
@@ -213,9 +237,9 @@ select_restore_destination() {
         echo -e "${BOLD}DB    ->${RESET} none ( files-only backup )"
         ;;
     esac
-    echo -e "${YELLOW}The staging target contents will be overwritten. The live site is NOT touched.${RESET}"
+    echo -e "${YELLOW}The target contents will be overwritten. The source ( live ) site is NOT touched.${RESET}"
     echo ""
-    read -p "$(echo -e "${BOLD}${BLUE}Proceed with this staging restore? (y/n): ${RESET}")" confirm_dest
+    read -p "$(echo -e "${BOLD}${BLUE}Proceed with this restore? (y/n): ${RESET}")" confirm_dest
     if [[ "${confirm_dest,,}" != "y" && "${confirm_dest,,}" != "yes" ]]; then
         echo -e "${YELLOW}Restore aborted.${RESET}"
         return 1
@@ -282,9 +306,9 @@ run_restore_db_import() {
         rm -f "$my_cnf"
         ;;
     wpconfig)
-        # Import through the staging site's own wp-config.php.
-        local owner=$(sudo stat -c "%U" "$RESTORE_TARGET_PATH")
-        run_wp_cli_as "${owner}" db import "${sql_file}" --path="${RESTORE_TARGET_PATH}" --skip-plugins --skip-themes
+        # Import through the target site's own wp-config.php, using the validated
+        # root wp-cli runtime so the site user's cgi-fcgi php can't break it.
+        run_wp_cli db import "${sql_file}" --path="${RESTORE_TARGET_PATH}" --allow-root --skip-plugins --skip-themes
         ;;
     origin)
         # Original behaviour: dispatch on the driver baked into the backup script.
@@ -308,8 +332,7 @@ run_restore_db_import() {
             sudo mysql --defaults-extra-file="$my_cnf" "$backup_db_name" <"$sql_file"
             rm -f "$my_cnf"
         else
-            local wp_owner=$(sudo stat -c "%U" "${RESTORE_TARGET_PATH}")
-            run_wp_cli_as "${wp_owner}" db import "${sql_file}" --path="${RESTORE_TARGET_PATH}" --skip-plugins --skip-themes
+            run_wp_cli db import "${sql_file}" --path="${RESTORE_TARGET_PATH}" --allow-root --skip-plugins --skip-themes
         fi
         ;;
     esac
@@ -317,47 +340,49 @@ run_restore_db_import() {
     sudo rm "$sql_file"
 }
 
-# After a staging import, rewrite the WordPress URL from the origin's ( which the
-# import just wrote into the DB ) to the staging URL captured earlier, so the
-# staged copy stops referencing the live domain. Only runs for a WordPress
-# staging target; explicit / non-WP restores print a note and leave URLs alone.
+# After the import, rewrite the WordPress URL from the source's ( which the
+# import just wrote into the DB ) to the target URL captured earlier, so the
+# restored copy stops referencing the live domain. Only runs for a WordPress
+# target imported via wp-config; explicit / non-WP restores leave URLs alone.
+# All wp-cli calls use the validated root runtime so a site user's cgi-fcgi php
+# can't break them.
 maybe_wp_search_replace() {
     if [ "$RESTORE_MODE" != "staging" ]; then
         return 0
     fi
     if [ "$RESTORE_DB_MODE" != "wpconfig" ]; then
         if [ "$RESTORE_DB_MODE" == "explicit" ]; then
-            echo -e "${YELLOW}Staging database imported with explicit credentials; skipping WordPress URL rewrite. Update siteurl/home manually if the data is a WordPress site.${RESET}"
+            echo -e "${YELLOW}Database imported with explicit credentials; skipping WordPress URL rewrite. Update siteurl/home manually if the data is a WordPress site.${RESET}"
         fi
         return 0
     fi
 
-    local owner=$(sudo stat -c "%U" "$RESTORE_TARGET_PATH")
-
-    # The freshly imported DB now holds the origin's URL — that is the value to
-    # search for. Tolerate a non-zero / empty read under set -e.
-    RESTORE_URL_OLD=$(run_wp_cli_as "$owner" option get siteurl --path="$RESTORE_TARGET_PATH" --skip-plugins --skip-themes 2>/dev/null) || true
+    # The freshly imported DB now holds the source's URL — that is the value to
+    # search for. Tolerate a non-zero / empty read under set -e, and only trust a
+    # real URL ( never a wp-cli error blob ).
+    RESTORE_URL_OLD=$(run_wp_cli option get siteurl --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes 2>/dev/null) || true
+    looks_like_http_url "$RESTORE_URL_OLD" || RESTORE_URL_OLD=""
 
     if [ -z "$RESTORE_URL_NEW" ]; then
-        echo -e "${YELLOW}No staging URL was captured; skipping URL rewrite.${RESET}"
+        echo -e "${YELLOW}No target URL was captured; skipping URL rewrite.${RESET}"
         return 0
     fi
     if [ -z "$RESTORE_URL_OLD" ] || [ "$RESTORE_URL_OLD" == "$RESTORE_URL_NEW" ]; then
-        echo -e "${YELLOW}Imported site URL is empty or already matches the staging URL ( ${RESTORE_URL_NEW} ); no rewrite needed.${RESET}"
+        echo -e "${YELLOW}Imported site URL is empty or already matches the target URL ( ${RESTORE_URL_NEW} ); no rewrite needed.${RESET}"
         return 0
     fi
 
     echo ""
     echo -e "${YELLOW}Rewriting site URL ${RESTORE_URL_OLD} -> ${RESTORE_URL_NEW} ...${RESET}"
-    # A failed rewrite would leave the staged copy pointing at the live domain, so
-    # surface it loudly rather than letting set -e tear the whole tool down.
-    if ! run_wp_cli_as "$owner" search-replace "$RESTORE_URL_OLD" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --skip-plugins --skip-themes; then
-        echo -e "${RED}URL rewrite failed. The staged copy may still reference ${RESTORE_URL_OLD}; fix it before using the stage.${RESET}"
+    # A failed rewrite would leave the restored copy pointing at the live domain,
+    # so surface it loudly rather than letting set -e tear the whole tool down.
+    if ! run_wp_cli search-replace "$RESTORE_URL_OLD" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes; then
+        echo -e "${RED}URL rewrite failed. The restored copy may still reference ${RESTORE_URL_OLD}; fix it before using the site.${RESET}"
         return 0
     fi
     # siteurl/home live in the options table; set them explicitly as a belt-and-
     # suspenders in case search-replace skipped a serialized edge case.
-    run_wp_cli_as "$owner" option update siteurl "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --skip-plugins --skip-themes || true
-    run_wp_cli_as "$owner" option update home "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --skip-plugins --skip-themes || true
-    run_wp_cli_as "$owner" cache flush --path="$RESTORE_TARGET_PATH" --skip-plugins --skip-themes >/dev/null 2>&1 || true
+    run_wp_cli option update siteurl "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || true
+    run_wp_cli option update home "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || true
+    run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
 }
