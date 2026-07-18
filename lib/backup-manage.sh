@@ -326,8 +326,8 @@ manage_automated_backups() {
                     echo ""
                     echo -e "You selected: ${BOLD}$selected_remote_backup${RESET}"
                     echo -e "Choose a restore approach:"
-                    echo -e "${BOLD}${YELLOW}1. ${RESET}Restore only"
-                    echo -e "${BOLD}${YELLOW}2. ${RESET}Clear and restore"
+                    echo -e "${BOLD}${YELLOW}1. ${RESET}Restore only ${RESET}( write the backup over the target; keep any existing files not in the backup )"
+                    echo -e "${BOLD}${YELLOW}2. ${RESET}Clear and restore ${RESET}( empty the target directory first, then restore — an exact copy of the backup )"
 
                     read -p "$(echo -e "${BOLD}${BLUE}Enter the number of your choice (1/2)${RESET} ${BLUE}( or q to go back ): ${RESET}")" restore_approach_choice
 
@@ -635,8 +635,8 @@ manage_automated_backups() {
                     echo ""
                     echo -e "You selected: ${BOLD}$selected_remote_backup${RESET}"
                     echo -e "Choose a restore approach:"
-                    echo -e "${BOLD}${YELLOW}1. ${RESET}Restore only"
-                    echo -e "${BOLD}${YELLOW}2. ${RESET}Clear and restore"
+                    echo -e "${BOLD}${YELLOW}1. ${RESET}Restore only ${RESET}( write the backup over the target; keep any existing files not in the backup )"
+                    echo -e "${BOLD}${YELLOW}2. ${RESET}Clear and restore ${RESET}( empty the target directory first, then restore — an exact copy of the backup )"
 
                     read -p "$(echo -e "${BOLD}${BLUE}Enter the number of your choice (1/2)${RESET} ${BLUE}( or q to go back ): ${RESET}")" restore_approach_choice
                     # Go back if the user typed q
