@@ -21,23 +21,37 @@
 #   RESTORE_PRESERVE_WPCONFIG target wp-config.php to protect across a file restore
 #   RESTORE_WPCONFIG_STASH    temp copy of that wp-config ( internal )
 
+# Locate a site's wp-config.php from its files directory, covering the standard
+# layout ( config in the dir ) and the WordOps/htdocs layout ( config one level
+# up ). Echoes the path, or nothing.
+wpconfig_file() {
+    local wp_dir="${1%/}"
+    if [ -f "$wp_dir/wp-config.php" ]; then
+        echo "$wp_dir/wp-config.php"
+    elif [ -f "${wp_dir%/htdocs}/wp-config.php" ]; then
+        echo "${wp_dir%/htdocs}/wp-config.php"
+    fi
+}
+
 # Read DB_NAME straight out of a site's wp-config.php. The database-collision
 # guard MUST NOT depend on wp-cli: on cPanel/Plesk, wp-cli invoked as the site
 # user can pick up that user's cgi-fcgi php and emit an error blob on stdout,
 # which would otherwise be mistaken for a database name. Parsing the literal from
 # wp-config.php is SAPI-independent and reliable. Echoes the name, or nothing.
 wpconfig_db_name() {
-    local wp_dir="${1%/}"
-    local cfg=""
-    if [ -f "$wp_dir/wp-config.php" ]; then
-        cfg="$wp_dir/wp-config.php"
-    elif [ -f "${wp_dir%/htdocs}/wp-config.php" ]; then
-        cfg="${wp_dir%/htdocs}/wp-config.php"
-    else
-        return 0
-    fi
+    local cfg=$(wpconfig_file "$1")
+    [ -z "$cfg" ] && return 0
     # Matches: define( 'DB_NAME', 'value' );  ( any quotes / whitespace )
     sudo grep -oP "define\(\s*['\"]DB_NAME['\"]\s*,\s*['\"]\K[^'\"]+" "$cfg" 2>/dev/null | head -n1
+}
+
+# Read a WP_HOME / WP_SITEURL constant from wp-config.php, if one is hard-coded
+# there. A no-DB, SAPI-independent fallback for the target's URL. Echoes it, or
+# nothing.
+wpconfig_constant_url() {
+    local cfg=$(wpconfig_file "$1")
+    [ -z "$cfg" ] && return 0
+    sudo grep -oP "define\(\s*['\"](WP_HOME|WP_SITEURL)['\"]\s*,\s*['\"]\Khttps?://[^'\"]+" "$cfg" 2>/dev/null | head -n1
 }
 
 # True only when the argument looks like an http(s) URL. Used to reject wp-cli
@@ -173,24 +187,43 @@ select_restore_destination() {
             return 1
         fi
 
-        # Capture the target site's current URL BEFORE the import overwrites it
-        # with the source's URL. Use the validated root wp-cli runtime, and only
-        # trust a value that actually looks like a URL ( never a wp-cli error blob ).
-        local captured_url=$(run_wp_cli option get siteurl --path="$effective_path" --allow-root --skip-plugins --skip-themes 2>/dev/null)
-        looks_like_http_url "$captured_url" && RESTORE_URL_NEW="$captured_url"
+        # Work out a DEFAULT URL for the restored copy: the target site's own
+        # current URL. Try the validated root wp-cli, then a WP_HOME/WP_SITEURL
+        # constant in wp-config.php, then the target directory name if it looks
+        # like a domain. Any of these can be empty; that just means no default.
+        local default_url=""
+        local u=$(run_wp_cli option get siteurl --path="$effective_path" --allow-root --skip-plugins --skip-themes 2>/dev/null)
+        looks_like_http_url "$u" && default_url="$u"
+        if [ -z "$default_url" ]; then
+            u=$(wpconfig_constant_url "$effective_path")
+            looks_like_http_url "$u" && default_url="$u"
+        fi
+        if [ -z "$default_url" ]; then
+            local base=$(basename "$effective_path")
+            [[ "$base" == *.* ]] && default_url="https://$base"
+        fi
 
+        # Read the source URL too, so we can refuse a target URL that would point
+        # the restored copy back at the live domain. Best-effort ( may be empty ).
         local origin_url=$(run_wp_cli option get siteurl --path="$origin_path" --allow-root --skip-plugins --skip-themes 2>/dev/null)
         looks_like_http_url "$origin_url" || origin_url=""
 
-        # If we could not read a target URL, or it currently matches the source's,
-        # ask the operator for a distinct URL so the restored copy never resolves
-        # to the live domain.
-        if [ -z "$RESTORE_URL_NEW" ] || { [ -n "$origin_url" ] && [ "$RESTORE_URL_NEW" == "$origin_url" ]; }; then
-            read -p "$(echo -e "${BOLD}${BLUE}Enter the URL to use after import ( e.g. https://staging.example.com )${RESET} ${BLUE}( or q to go back ): ${RESET}")" RESTORE_URL_NEW
-            if [ "${RESTORE_URL_NEW,,}" == "q" ] || [ -z "$RESTORE_URL_NEW" ]; then
-                return 1
+        # Always confirm the URL, pre-filled with the default: Enter accepts it.
+        # Loop until it is a real URL that differs from the source URL.
+        while true; do
+            read -p "$(echo -e "${BOLD}${BLUE}URL to use after import${default_url:+ [ default: ${default_url} ]}${RESET} ${BLUE}( or q to go back ): ${RESET}")" RESTORE_URL_NEW
+            [ "${RESTORE_URL_NEW,,}" == "q" ] && return 1
+            [ -z "$RESTORE_URL_NEW" ] && RESTORE_URL_NEW="$default_url"
+            if ! looks_like_http_url "$RESTORE_URL_NEW"; then
+                echo -e "${RED}Please enter a full URL, e.g. https://example.com${RESET}"
+                continue
             fi
-        fi
+            if [ -n "$origin_url" ] && [ "$RESTORE_URL_NEW" == "$origin_url" ]; then
+                echo -e "${RED}That matches the source URL; the restored copy must use a different URL.${RESET}"
+                continue
+            fi
+            break
+        done
 
         # Standard layout keeps wp-config.php inside the files directory, so a
         # full / incremental restore would overwrite it with the origin's DB
