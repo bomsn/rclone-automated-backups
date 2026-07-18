@@ -292,6 +292,15 @@ manage_automated_backups() {
                 ;;
             "View/restore remote backups")
 
+                # Resolve WHERE this restore lands ( live origin or a staging
+                # target ) before doing anything. On abort ( user bailed or a
+                # safety guard tripped ) leave the printed reason on screen and
+                # fall back to the menu.
+                if ! select_restore_destination "$selected_backup_path" "$selected_backup_domain" "$selected_backup_script" "$selected_backup_type"; then
+                    echo ""
+                    break
+                fi
+
                 if [ $selected_backup_type == "incremental" ]; then
 
                     echo ""
@@ -332,36 +341,51 @@ manage_automated_backups() {
                     if [[ $restore_approach_choice == "1" || $restore_approach_choice == "2" ]]; then
                         restore_cursor_position
 
-                        # Show a pre-restore backup notice
-                        echo ""
-                        echo -e "${YELLOW}Taking a pre-restore backup ...${RESET}"
-                        # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
-                        # Abort the restore if the pre-restore backup did not succeed ( protects the live site )
-                        if ! sudo bash "$selected_backup_script" "restore"; then
-                            restore_cursor_position
-                            echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your site.${RESET}"
+                        # A pre-restore backup only protects the live site, so it
+                        # is pointless ( and would waste remote space ) when the
+                        # restore is aimed at a staging target.
+                        if [ "$RESTORE_MODE" == "origin" ]; then
+                            # Show a pre-restore backup notice
                             echo ""
-                            break
+                            echo -e "${YELLOW}Taking a pre-restore backup ...${RESET}"
+                            # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
+                            # Abort the restore if the pre-restore backup did not succeed ( protects the live site )
+                            if ! sudo bash "$selected_backup_script" "restore"; then
+                                restore_cursor_position
+                                echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your site.${RESET}"
+                                echo ""
+                                break
+                            fi
                         fi
+
+                        # Keep the staging site's own wp-config.php ( with its
+                        # staging DB credentials ) safe across the file restore.
+                        stash_staging_wpconfig
 
                         # Clear the destination folder if "clear and restore is selected"
                         if [[ $restore_approach_choice == "2" ]]; then
-                            sudo rm -rf "${selected_backup_path%/}"/*
+                            sudo rm -rf "${RESTORE_TARGET_PATH%/}"/*
                         fi
 
                         # Show a restoration notice
                         echo ""
-                        echo -e "${YELLOW}Restoring${RESET} ${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to:${RESET} ${BOLD}${YELLOW}$selected_backup_path${RESET}"
+                        echo -e "${YELLOW}Restoring${RESET} ${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to:${RESET} ${BOLD}${YELLOW}$RESTORE_TARGET_PATH${RESET}"
 
-                        # Restore to the same backed up path
-                        # Use --target to manipulate the destination
-                        # Use --include to only include specific folder or file from snapshot
-                        # use ":path/to/folder" after the snapshot ID to restore the content of a specific folder directly
-                        sudo RESTIC_PASSWORD="${restic_password}" restic -r "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" restore $selected_remote_backup --target "/"
+                        # Origin restores rewrite the snapshot's absolute paths in
+                        # place ( --target "/" ). Staging restores select the
+                        # site subtree from the snapshot ( "snap:origin_path" ) and
+                        # land it at the staging target, so no live paths are ever
+                        # written.
+                        if [ "$RESTORE_MODE" == "staging" ]; then
+                            sudo RESTIC_PASSWORD="${restic_password}" restic -r "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" restore "${selected_remote_backup}:${selected_backup_path%/}" --target "${RESTORE_TARGET_PATH}"
+                        else
+                            sudo RESTIC_PASSWORD="${restic_password}" restic -r "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" restore $selected_remote_backup --target "/"
+                        fi
                     else
                         restore_cursor_position
                         echo -e "${YELLOW}restore has been aborted.${RESET}"
                         echo ""
+                        break # skip the shared import/success steps below
                     fi
                 elif [ "$selected_backup_type" == "database" ]; then
 
@@ -460,7 +484,11 @@ manage_automated_backups() {
                     # Confirm with the user before restoring the database
                     echo ""
                     echo -e "You selected: ${BOLD}$selected_remote_backup${RESET}"
-                    echo -e "${BOLD}${YELLOW}NOTE: ${RESET}${YELLOW}This overwrites the live database for '${selected_backup_domain}'. Site files are NOT touched.${RESET}"
+                    if [ "$RESTORE_MODE" == "origin" ]; then
+                        echo -e "${BOLD}${YELLOW}NOTE: ${RESET}${YELLOW}This overwrites the live database for '${selected_backup_domain}'. Site files are NOT touched.${RESET}"
+                    else
+                        echo -e "${BOLD}${YELLOW}NOTE: ${RESET}${YELLOW}This imports into the staging database at '${RESTORE_TARGET_PATH}'. The live site is NOT touched.${RESET}"
+                    fi
                     read -p "$(echo -e "${BOLD}${BLUE}Proceed with the database restore? (y/n)${RESET} ${BLUE}( or q to go back ): ${RESET}")" db_restore_confirm
 
                     # Go back if the user typed q
@@ -473,26 +501,30 @@ manage_automated_backups() {
                     if [[ "${db_restore_confirm,,}" == "y" || "${db_restore_confirm,,}" == "yes" ]]; then
                         restore_cursor_position
 
-                        # Show a pre-restore backup notice
-                        echo ""
-                        echo -e "${YELLOW}Taking a pre-restore database backup ...${RESET}"
-                        # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
-                        # Abort the restore if the pre-restore backup did not succeed ( protects the live database )
-                        if ! sudo bash "$selected_backup_script" "restore"; then
-                            restore_cursor_position
-                            echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your database.${RESET}"
+                        # A pre-restore backup only protects the live database, so
+                        # skip it when importing into a staging target.
+                        if [ "$RESTORE_MODE" == "origin" ]; then
+                            # Show a pre-restore backup notice
                             echo ""
-                            break
+                            echo -e "${YELLOW}Taking a pre-restore database backup ...${RESET}"
+                            # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
+                            # Abort the restore if the pre-restore backup did not succeed ( protects the live database )
+                            if ! sudo bash "$selected_backup_script" "restore"; then
+                                restore_cursor_position
+                                echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your database.${RESET}"
+                                echo ""
+                                break
+                            fi
                         fi
 
                         # Show a restoration notice
                         echo ""
-                        echo -e "${YELLOW}Restoring ${RESET}${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to${RESET} ${BOLD}${YELLOW}$selected_backup_domain${RESET}"
+                        echo -e "${YELLOW}Restoring ${RESET}${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to${RESET} ${BOLD}${YELLOW}$RESTORE_TARGET_PATH${RESET}"
                         # Pull the compressed database backup from remote
                         sudo rclone copyto --progress "${selected_backup_rclone_remote}":"${selected_backup_remote_location}${selected_remote_backup}" "${TMP_DIR}/${selected_remote_backup}.tmp"
 
-                        # Decompress the dump into the site path so the shared import step below picks it up
-                        sudo bash -c "gunzip -c '${TMP_DIR}/${selected_remote_backup}.tmp' > '${selected_backup_path%/}/${selected_remote_backup%.gz}'"
+                        # Decompress the dump into the target path so the shared import step below picks it up
+                        sudo bash -c "gunzip -c '${TMP_DIR}/${selected_remote_backup}.tmp' > '${RESTORE_TARGET_PATH%/}/${selected_remote_backup%.gz}'"
                         sudo rm "${TMP_DIR}/${selected_remote_backup}.tmp"
 
                     else
@@ -617,78 +649,63 @@ manage_automated_backups() {
                     if [[ $restore_approach_choice == "1" || $restore_approach_choice == "2" ]]; then
                         restore_cursor_position
 
-                        # Show a pre-restore backup notice
-                        echo ""
-                        echo -e "${YELLOW}Taking a pre-restore backup ...${RESET}"
-                        # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
-                        # Abort the restore if the pre-restore backup did not succeed ( protects the live site )
-                        if ! sudo bash "$selected_backup_script" "restore"; then
-                            restore_cursor_position
-                            echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your site.${RESET}"
+                        # A pre-restore backup only protects the live site, so skip
+                        # it when the restore is aimed at a staging target.
+                        if [ "$RESTORE_MODE" == "origin" ]; then
+                            # Show a pre-restore backup notice
                             echo ""
-                            break
+                            echo -e "${YELLOW}Taking a pre-restore backup ...${RESET}"
+                            # Take a backup using backup script with the arg "restore" to indicate this is a pre-restore backup
+                            # Abort the restore if the pre-restore backup did not succeed ( protects the live site )
+                            if ! sudo bash "$selected_backup_script" "restore"; then
+                                restore_cursor_position
+                                echo -e "${RED}Pre-restore backup failed. Restore aborted to protect your site.${RESET}"
+                                echo ""
+                                break
+                            fi
                         fi
 
                         # Show a restoration notice
                         echo ""
-                        echo -e "${YELLOW}Restoring ${RESET}${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to${RESET} ${BOLD}${YELLOW}$selected_backup_path${RESET}"
+                        echo -e "${YELLOW}Restoring ${RESET}${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to${RESET} ${BOLD}${YELLOW}$RESTORE_TARGET_PATH${RESET}"
                         # Pull the backup from remote
                         sudo rclone copyto --progress "${selected_backup_rclone_remote}":"${selected_backup_remote_location}${selected_remote_backup}" "${TMP_DIR}/${selected_remote_backup}.tmp"
 
+                        # Keep the staging site's own wp-config.php ( with its
+                        # staging DB credentials ) safe across the file restore.
+                        stash_staging_wpconfig
+
                         # Handle "Clear and restore" option
                         if [ $restore_approach_choice == "2" ]; then
-                            sudo rm -rf "${selected_backup_path%/}"/*
+                            sudo rm -rf "${RESTORE_TARGET_PATH%/}"/*
                         fi
 
                         # Unzip the backup file inside the destination folder
-                        sudo tar -xzf "${TMP_DIR}/${selected_remote_backup}.tmp" -C "$selected_backup_path"
+                        sudo tar -xzf "${TMP_DIR}/${selected_remote_backup}.tmp" -C "$RESTORE_TARGET_PATH"
                         sudo rm "${TMP_DIR}/${selected_remote_backup}.tmp"
 
                     else
                         restore_cursor_position
                         echo -e "${BOLD}${YELLOW}'$selected_remote_backup'${RESET} ${YELLOW}restoration has been aborted.${RESET}"
                         echo ""
+                        break # skip the shared import/success steps below
                     fi
                 fi
 
-                # A files-only backup has no database to import - the archive
-                # is just the directory contents. Skip the DB import step for
-                # those entries.
-                if [ "$selected_backup_type" != "files" ]; then
-                    # Show a db import notice
-                    echo ""
-                    echo -e "${YELLOW}Importing the database ...${RESET}"
-                    local sql_file=$(find "$selected_backup_path" -type f -name "*${selected_backup_hash}_*.sql" -print -quit) # find the sql file path
+                # Put the staging site's own wp-config.php back ( no-op for origin
+                # restores and for restores that did not overwrite one ) so the
+                # import and URL rewrite below run against the staging database.
+                restore_staging_wpconfig
 
-                    # Dispatch on the database driver baked into the backup
-                    # script. Legacy scripts that pre-date this knob have no
-                    # db_driver= line, so we default to wpcli for them.
-                    local backup_db_driver=$(grep -oP 'db_driver="\K[^"]+' "$selected_backup_script" 2>/dev/null)
-                    [ -z "$backup_db_driver" ] && backup_db_driver="wpcli"
+                # Import the dump into the resolved database — origin ( baked
+                # driver ), the staging site's wp-config, or explicit staging
+                # credentials. Files-only backups are skipped inside the helper.
+                run_restore_db_import "$selected_backup_type" "$selected_backup_script" "$selected_backup_hash"
 
-                    if [ "$backup_db_driver" == "mysqldump" ]; then
-                        if ! command -v base64 >/dev/null 2>&1; then
-                            echo -e "${RED}base64 is required to decode mysqldump credentials but was not found on PATH.${RESET}" >&2
-                            return 1
-                        fi
-                        # Credentials are stored base64-encoded ( see the bake
-                        # site in lib/backup-create.sh ) so any byte sequence
-                        # in the password survives. Decode them here.
-                        local backup_db_name=$(grep -oP '^db_name_b64=\K.*' "$selected_backup_script" | base64 -d)
-                        local backup_db_user=$(grep -oP '^db_user_b64=\K.*' "$selected_backup_script" | base64 -d)
-                        local backup_db_pass=$(grep -oP '^db_pass_b64=\K.*' "$selected_backup_script" | base64 -d)
-                        local backup_db_host=$(grep -oP '^db_host_b64=\K.*' "$selected_backup_script" | base64 -d)
-                        local my_cnf=$(mktemp)
-                        chmod 600 "$my_cnf"
-                        printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "$backup_db_user" "$backup_db_pass" "$backup_db_host" > "$my_cnf"
-                        sudo mysql --defaults-extra-file="$my_cnf" "$backup_db_name" < "$sql_file"
-                        rm -f "$my_cnf"
-                    else
-                        local wp_owner=$(sudo stat -c "%U" ${selected_backup_path})                                                # get WordPress folder owner
-                        run_wp_cli_as "${wp_owner}" db import "${sql_file}" --path="${selected_backup_path}" --skip-plugins --skip-themes          # import db
-                    fi
-                    sudo rm "${sql_file}"                                                                                          # Delete the SQL file after it's been imported
-                fi
+                # For a WordPress staging restore, repoint the site URL from the
+                # origin's ( just imported ) to the captured staging URL so the
+                # staged copy never resolves to the live domain.
+                maybe_wp_search_replace
 
                 clear_screen "force"
                 # Show a success message
