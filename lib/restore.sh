@@ -14,6 +14,7 @@
 # RESTORE_MODE uses the internal token "staging" for the "another path/site" case:
 #   RESTORE_MODE              origin | staging
 #   RESTORE_TARGET_PATH       effective files directory the restore writes into
+#   RESTORE_SOURCE_PATH       the source site's files directory ( for path rewrite )
 #   RESTORE_DB_MODE           origin | wpconfig | explicit | none
 #   RESTORE_DB_NAME/USER/PASS/HOST   explicit target DB credentials
 #   RESTORE_URL_NEW           URL to stamp on the restored copy after import
@@ -95,6 +96,7 @@ select_restore_destination() {
     # Reset every output so a prior selection can't leak into this one.
     RESTORE_MODE=""
     RESTORE_TARGET_PATH=""
+    RESTORE_SOURCE_PATH="$origin_path"
     RESTORE_DB_MODE=""
     RESTORE_DB_NAME=""
     RESTORE_DB_USER=""
@@ -337,6 +339,18 @@ run_restore_db_import() {
         printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "$RESTORE_DB_USER" "$RESTORE_DB_PASS" "$RESTORE_DB_HOST" >"$my_cnf"
         sudo mysql --defaults-extra-file="$my_cnf" "$RESTORE_DB_NAME" <"$sql_file"
         rm -f "$my_cnf"
+
+        # If the restored files include a wp-config.php ( a WordPress backup landed
+        # on a fresh path ), point it at the credentials just used so the site can
+        # actually connect — the archive carried the SOURCE site's credentials.
+        # "wp config set" edits the file only; it needs no database connection.
+        if [ -f "$RESTORE_TARGET_PATH/wp-config.php" ]; then
+            echo -e "${YELLOW}Updating wp-config.php with the target database credentials ...${RESET}"
+            run_wp_cli config set DB_NAME "$RESTORE_DB_NAME" --path="$RESTORE_TARGET_PATH" --type=constant --allow-root || true
+            run_wp_cli config set DB_USER "$RESTORE_DB_USER" --path="$RESTORE_TARGET_PATH" --type=constant --allow-root || true
+            run_wp_cli config set DB_PASSWORD "$RESTORE_DB_PASS" --path="$RESTORE_TARGET_PATH" --type=constant --allow-root || true
+            run_wp_cli config set DB_HOST "$RESTORE_DB_HOST" --path="$RESTORE_TARGET_PATH" --type=constant --allow-root || true
+        fi
         ;;
     wpconfig)
         # Import through the target site's own wp-config.php, using the validated
@@ -417,5 +431,14 @@ maybe_wp_search_replace() {
     # suspenders in case search-replace skipped a serialized edge case.
     run_wp_cli option update siteurl "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || true
     run_wp_cli option update home "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || true
+
+    # When the files also moved to a different directory, rewrite any absolute
+    # filesystem paths the database carries ( some plugins / caches store ABSPATH
+    # or upload paths ). Harmless when the paths match ( skipped ) or absent.
+    if [ -n "$RESTORE_SOURCE_PATH" ] && [ "$RESTORE_SOURCE_PATH" != "$RESTORE_TARGET_PATH" ]; then
+        echo -e "${YELLOW}Rewriting stored paths ${RESTORE_SOURCE_PATH} -> ${RESTORE_TARGET_PATH} ...${RESET}"
+        run_wp_cli search-replace "$RESTORE_SOURCE_PATH" "$RESTORE_TARGET_PATH" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes || true
+    fi
+
     run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
 }
