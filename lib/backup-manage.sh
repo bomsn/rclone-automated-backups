@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/metadata.sh"
 
 # Automated backup management: list, enable/disable, delete, restore
 
@@ -51,17 +52,17 @@ manage_automated_backups() {
             fi
 
             # Extract other details from the backup script variables
-            local backup_type=$(grep -oP '(?<!\w)type="\K[^"]+' "$script_file")                                  # only double quote enclosed values
-            local creation_date=$(grep -oP 'creation_date="\K[^"]+' "$script_file")                              # only double quote enclosed values
-            local cron_expression=$(grep -oP 'cron_expression="\K[^"]+' "$script_file")                          # only double quote enclosed values
-            local backup_hash=$(grep -oP '(?<!\w)hash="\K[^"]+' "$script_file")                                  # only double quote enclosed values
-            local backup_domain=$(grep -oP 'domain="\K[^"]+' "$script_file")                                     # only double quote enclosed values
-            local backup_path=$(grep -oP 'domain_path="\K[^"]+' "$script_file")                                  # only double quote enclosed values
-            local remote_location=$(grep -oP 'remote_backup_location="\K[^"]+' "$script_file")                   # only double quote enclosed values
-            local rclone_remote=$(grep -oP 'rclone_remote="\K[^"]+' "$script_file")                              # only double quote enclosed values
-            local retention_period=$(grep -oP 'retention_period=("[^"]*"|\S+)' "$script_file" | cut -d '=' -f 2) # Extract value that doesn't have double quotes
-            local schedule=$(grep -oP '(?<!\w)schedule="\K[^"]+' "$script_file")                                  # baked schedule, newer backups only
-            local schedule_label=$(grep -oP 'schedule_label="\K[^"]+' "$script_file")                             # human-readable schedule, newer backups only
+            local backup_type=$(read_backup_setting "$script_file" type)
+            local creation_date=$(read_backup_setting "$script_file" creation_date)
+            local cron_expression=$(read_backup_setting "$script_file" cron_expression)
+            local backup_hash=$(read_backup_setting "$script_file" hash)
+            local backup_domain=$(read_backup_setting "$script_file" domain)
+            local backup_path=$(read_backup_setting "$script_file" domain_path)
+            local remote_location=$(read_backup_setting "$script_file" remote_backup_location)
+            local rclone_remote=$(read_backup_setting "$script_file" rclone_remote)
+            local retention_period=$(read_backup_setting "$script_file" retention_period)
+            local schedule=$(read_backup_setting "$script_file" schedule)
+            local schedule_label=$(read_backup_setting "$script_file" schedule_label)
 
             # Validate the integrity of this script
             local existing_script_prefix="${script_filename%%_*}"
@@ -111,7 +112,7 @@ manage_automated_backups() {
             # explicit suffix so users can tell at a glance which database
             # backend a database/full backup is using. wpcli is the default
             # and stays implicit to keep the listing tidy.
-            local baked_driver=$(grep -oP 'db_driver="\K[^"]+' "$script_file" 2>/dev/null)
+            local baked_driver=$(read_backup_setting "$script_file" db_driver)
             local display_backup_type="$backup_type"
             if [[ "$backup_type" == "database" || "$backup_type" == "full" ]] \
                 && [ "$baked_driver" == "mysqldump" ]; then
@@ -308,10 +309,11 @@ manage_automated_backups() {
                     echo ""
 
                     # Extract repo password from backup file ( may not have double quotes )
-                    local restic_password=$(grep -oP 'restic_password=("[^"]*"|\S+)' "$selected_backup_script" | cut -d '=' -f 2)
+                    local restic_password
+                    restic_password=$(read_restic_password "$selected_backup_script") || return 1
 
                     # List existing snapshots
-                    sudo RESTIC_PASSWORD="${restic_password}" restic -r "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" snapshots
+                    RESTIC_PASSWORD="${restic_password}" sudo --preserve-env=RESTIC_PASSWORD restic -r "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" snapshots || return 1
 
                     # Ask the user to select a backup for restoration
                     read -p "$(echo -e "${BOLD}${BLUE}Enter the ID of the backup you'd like to restore ( or q to go back ): ${RESET}")" selected_remote_backup
@@ -362,25 +364,27 @@ manage_automated_backups() {
                         # staging DB credentials ) safe across the file restore.
                         stash_staging_wpconfig
 
-                        # Clear the destination folder if "clear and restore is selected"
-                        if [[ $restore_approach_choice == "2" ]]; then
-                            sudo rm -rf "${RESTORE_TARGET_PATH%/}"/*
-                        fi
-
                         # Show a restoration notice
                         echo ""
                         echo -e "${YELLOW}Restoring${RESET} ${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to:${RESET} ${BOLD}${YELLOW}$RESTORE_TARGET_PATH${RESET}"
 
-                        # Origin restores rewrite the snapshot's absolute paths in
-                        # place ( --target "/" ). Staging restores select the
-                        # site subtree from the snapshot ( "snap:origin_path" ) and
-                        # land it at the staging target, so no live paths are ever
-                        # written.
-                        if [ "$RESTORE_MODE" == "staging" ]; then
-                            sudo RESTIC_PASSWORD="${restic_password}" restic -r "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" restore "${selected_remote_backup}:${selected_backup_path%/}" --target "${RESTORE_TARGET_PATH}"
-                        else
-                            sudo RESTIC_PASSWORD="${restic_password}" restic -r "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" restore $selected_remote_backup --target "/"
+                        # Both modes restore only the selected site's subtree.
+                        # The separate private SQL source must never be replayed
+                        # into its original absolute path as a side effect.
+                        local restore_work
+                        restore_work=$(mktemp -d /var/tmp/rclone-restore-files.XXXXXXXXXX)
+                        chmod 700 "$restore_work"
+                        if ! RESTIC_PASSWORD="${restic_password}" sudo --preserve-env=RESTIC_PASSWORD restic -r "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" restore "${selected_remote_backup}:${selected_backup_path%/}" --target "$restore_work/tree"; then
+                            rm -rf -- "$restore_work"
+                            return 1
                         fi
+                        tar -cf "$restore_work/files.tar" -C "$restore_work/tree" . || return 1
+                        if ! restore_archive_files "$restore_work/files.tar" "$([ "$restore_approach_choice" == 2 ] && echo true || echo false)"; then
+                            rm -rf -- "$restore_work"
+                            return 1
+                        fi
+                        rm -rf -- "$restore_work"
+                        restore_incremental_database_file "$selected_backup_script" "$selected_remote_backup" "rclone:${selected_backup_rclone_remote}:${selected_backup_remote_location}" "$restic_password" || return 1
                     else
                         restore_cursor_position
                         echo -e "${YELLOW}restore has been aborted.${RESET}"
@@ -521,11 +525,17 @@ manage_automated_backups() {
                         echo ""
                         echo -e "${YELLOW}Restoring ${RESET}${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to${RESET} ${BOLD}${YELLOW}$RESTORE_TARGET_PATH${RESET}"
                         # Pull the compressed database backup from remote
-                        sudo rclone copyto --progress "${selected_backup_rclone_remote}":"${selected_backup_remote_location}${selected_remote_backup}" "${TMP_DIR}/${selected_remote_backup}.tmp"
-
-                        # Decompress the dump into the target path so the shared import step below picks it up
-                        sudo bash -c "gunzip -c '${TMP_DIR}/${selected_remote_backup}.tmp' > '${RESTORE_TARGET_PATH%/}/${selected_remote_backup%.gz}'"
-                        sudo rm "${TMP_DIR}/${selected_remote_backup}.tmp"
+                        local compressed_sql
+                        compressed_sql=$(mktemp /var/tmp/rclone-restore-compressed.XXXXXXXXXX)
+                        RESTORE_SQL_FILE=$(mktemp /var/tmp/rclone-restore-db.XXXXXXXXXX)
+                        chmod 600 "$compressed_sql" "$RESTORE_SQL_FILE"
+                        if ! sudo rclone copyto --progress "${selected_backup_rclone_remote}:${selected_backup_remote_location}${selected_remote_backup}" "$compressed_sql" ||
+                           ! gzip -dc -- "$compressed_sql" > "$RESTORE_SQL_FILE"; then
+                            rm -f -- "$compressed_sql" "$RESTORE_SQL_FILE"
+                            RESTORE_SQL_FILE=''
+                            return 1
+                        fi
+                        rm -f -- "$compressed_sql"
 
                     else
                         restore_cursor_position
@@ -669,20 +679,22 @@ manage_automated_backups() {
                         echo ""
                         echo -e "${YELLOW}Restoring ${RESET}${BOLD}${YELLOW}$selected_remote_backup${RESET} ${YELLOW}to${RESET} ${BOLD}${YELLOW}$RESTORE_TARGET_PATH${RESET}"
                         # Pull the backup from remote
-                        sudo rclone copyto --progress "${selected_backup_rclone_remote}":"${selected_backup_remote_location}${selected_remote_backup}" "${TMP_DIR}/${selected_remote_backup}.tmp"
+                        local restore_archive
+                        restore_archive=$(mktemp /var/tmp/rclone-restore-archive.XXXXXXXXXX)
+                        chmod 600 "$restore_archive"
+                        sudo rclone copyto --progress "${selected_backup_rclone_remote}:${selected_backup_remote_location}${selected_remote_backup}" "$restore_archive" || return 1
 
                         # Keep the staging site's own wp-config.php ( with its
                         # staging DB credentials ) safe across the file restore.
                         stash_staging_wpconfig
 
-                        # Handle "Clear and restore" option
-                        if [ $restore_approach_choice == "2" ]; then
-                            sudo rm -rf "${RESTORE_TARGET_PATH%/}"/*
+                        local restore_dump_hash=''
+                        [ "$selected_backup_type" != full ] || restore_dump_hash="$selected_backup_hash"
+                        if ! restore_archive_files "$restore_archive" "$([ "$restore_approach_choice" == 2 ] && echo true || echo false)" "$restore_dump_hash"; then
+                            rm -f -- "$restore_archive"
+                            return 1
                         fi
-
-                        # Unzip the backup file inside the destination folder
-                        sudo tar -xzf "${TMP_DIR}/${selected_remote_backup}.tmp" -C "$RESTORE_TARGET_PATH"
-                        sudo rm "${TMP_DIR}/${selected_remote_backup}.tmp"
+                        rm -f -- "$restore_archive"
 
                     else
                         restore_cursor_position
@@ -695,17 +707,17 @@ manage_automated_backups() {
                 # Put the staging site's own wp-config.php back ( no-op for origin
                 # restores and for restores that did not overwrite one ) so the
                 # import and URL rewrite below run against the staging database.
-                restore_staging_wpconfig
+                restore_staging_wpconfig || return 1
 
                 # Import the dump into the resolved database — origin ( baked
                 # driver ), the staging site's wp-config, or explicit staging
                 # credentials. Files-only backups are skipped inside the helper.
-                run_restore_db_import "$selected_backup_type" "$selected_backup_script" "$selected_backup_hash"
+                run_restore_db_import "$selected_backup_type" "$selected_backup_script" "$selected_backup_hash" || return 1
 
                 # For a WordPress staging restore, repoint the site URL from the
                 # origin's ( just imported ) to the captured staging URL so the
                 # staged copy never resolves to the live domain.
-                maybe_wp_search_replace
+                maybe_wp_search_replace || return 1
 
                 clear_screen "force"
                 # Show a success message

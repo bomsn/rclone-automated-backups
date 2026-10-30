@@ -1,4 +1,9 @@
-.git*
+.git/
+.git-credentials
+cron_scripts/
+definitions
+tmp/
+*.log
 todo.txt
 
 # ==============================================================================

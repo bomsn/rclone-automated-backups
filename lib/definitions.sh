@@ -1,45 +1,37 @@
 #!/bin/bash
 
 # Definitions file persistence and derived state variables
+source "$(dirname "${BASH_SOURCE[0]}")/locking.sh"
 
 # Function to save definitions to the file
 update_definitions() {
-
-    # Remove leading and trailing spaces from elements and copy to new arrays
-    local new_domains=()
-    local new_paths=()
-    for domain in "${DOMAINS[@]}"; do
-        new_domains+=("\"${domain#"${domain%%[![:space:]]*}"}\"") # trip spaces and add inside double quote
-    done
-    for path in "${PATHS[@]}"; do
-        new_paths+=("\"${path#"${path%%[![:space:]]*}"}\"") # trip spaces and add inside double quote
-    done
-
-    # Overwrite the definitions file
-    cat <<EOL >"$DEFINITIONS_FILE"
-# Definitions
-
-# Indexed arrays for domains and paths
-EOL
-
-    if [ ${#new_domains[@]} -eq 0 ]; then
-        echo "DOMAINS=()" >>"$DEFINITIONS_FILE"
-    else
-        echo "DOMAINS=(${new_domains[@]})" >>"$DEFINITIONS_FILE"
+    # This file is sourced by later runs. Serialize values as literal Bash data,
+    # and replace atomically so interrupted writes cannot truncate the inventory.
+    local candidate value
+    if [[ -L "$DEFINITIONS_FILE" || ( -e "$DEFINITIONS_FILE" && ! -f "$DEFINITIONS_FILE" ) ]]; then
+        echo 'Definitions must be a regular file, not a symbolic link.' >&2
+        return 1
     fi
-
-    if [ ${#new_paths[@]} -eq 0 ]; then
-        echo "PATHS=()" >>"$DEFINITIONS_FILE"
-    else
-        echo "PATHS=(${new_paths[@]})" >>"$DEFINITIONS_FILE"
+    candidate=$(mktemp "${DEFINITIONS_FILE}.XXXXXXXXXX") || return 1
+    if ! (
+        set -e
+        printf '# Definitions\nDOMAINS=('
+        for value in "${DOMAINS[@]}"; do
+            printf '%q ' "${value#"${value%%[![:space:]]*}"}"
+        done
+        printf ')\nPATHS=('
+        for value in "${PATHS[@]}"; do
+            printf '%q ' "${value#"${value%%[![:space:]]*}"}"
+        done
+        printf ')\nNOTIFY_EMAIL=%q\n' "${NOTIFY_EMAIL}"
+    ) >"$candidate"; then
+        rm -f -- "$candidate"
+        return 1
     fi
-
-    # Notification settings
-    cat <<EOL >>"$DEFINITIONS_FILE"
-
-# Email address for backup failure alerts ( empty = notifications disabled )
-NOTIFY_EMAIL="${NOTIFY_EMAIL}"
-EOL
+    if ! chmod 600 "$candidate" || ! mv -f -- "$candidate" "$DEFINITIONS_FILE"; then
+        rm -f -- "$candidate"
+        return 1
+    fi
 
     # Update definitions state variables
     update_definitions_state
@@ -82,7 +74,8 @@ persist_new_domain() {
     local lock_file="/tmp/rclone-automated-backups-definitions.lock"
     local i exists=false
 
-    exec 9>"$lock_file"
+    prepare_backup_lock "$lock_file" || return 1
+    exec 9<>"$lock_file"
     flock 9
 
     # Re-read the freshest on-disk state ( a concurrent run may have added sites )
