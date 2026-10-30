@@ -2,6 +2,19 @@
 
 # Email failure-notification configuration
 
+# Definitions historically quoted email values; the current serializer uses
+# printf %q. Accept both validated literal forms without sourcing shell code.
+read_notification_email() {
+    local path="$1" value
+    [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 1
+    value=$(sed -n 's/^NOTIFY_EMAIL=//p' "$path") || return 1
+    if [[ "$value" == \"*\" ]]; then
+        value=${value:1:${#value}-2}
+    fi
+    [[ "$value" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || return 1
+    printf '%s\n' "$value"
+}
+
 # Configure the single email address that receives backup failure alerts.
 # The address is stored in the definitions file and read by every backup
 # script at run time, so setting it once covers all backups.

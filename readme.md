@@ -13,6 +13,12 @@ Always required:
 - [rclone](https://rclone.org/) installed.
 
 Required for WordPress backups using the wp-cli driver ( the default for `full` / `database` / `incremental` types ):
+On servers with multiple PHP versions, pass `--php-binary /usr/bin/php8.3` (using
+the site's actual version) when creating a scheduled backup. The generated job
+retains this selection and fails if it becomes unavailable, instead of silently
+running WordPress under another version. Without this option, existing automatic
+CLI detection remains in use.
+
 - [wp-cli](https://wp-cli.org/) installed.
 - A PHP CLI binary findable by the resolver — on PATH, or under one of:
   - `/opt/plesk/php/*/bin/php` ( Plesk )
@@ -24,6 +30,7 @@ Required for the `mysqldump` database driver ( alternative to wp-cli, used for n
 
 Required for the `files` backup type:
 - `tar` ( present on every Linux distribution by default ).
+- Python 3.11 or later for descriptor-based, owner-isolated file restores.
 
 ## Optional
 - [restic](https://restic.readthedocs.io/en/stable/020_installation.html) to add incremental backup support ( no setup or configuration needed ).
@@ -69,7 +76,7 @@ That's it, once you've completed all the configuration steps, a cron job will be
 |------|------------------|---------------|-------------|
 | `full` | Site files + database in one `tar.gz` | wp-cli ( default ) or mysqldump | The standard WordPress backup ( files + DB together ) |
 | `database` | Database only ( compressed `.sql.gz` ) | wp-cli ( default ) or mysqldump | Lightweight daily companion to a weekly `full` |
-| `incremental` | Files + database via restic snapshots | wp-cli ( hardcoded ) | Fast nightly snapshots on top of a periodic `full` |
+| `incremental` | Files + database via encrypted, deduplicated restic snapshots | wp-cli ( hardcoded ) | Nightly recovery points alongside a periodic `full` |
 | `files` | Directory only ( `tar.gz` ); no database | none | Any non-WordPress directory ( forums, static sites, custom apps without a DB ) |
 
 ## Database drivers
@@ -81,7 +88,17 @@ The `full` and `database` types accept a `--db-driver` knob:
 | `wpcli` ( default ) | From `wp-config.php` in the site path | Standard WordPress sites |
 | `mysqldump` | From `--db-name` / `--db-user` / `--db-pass` / `--db-host` flags | Non-WordPress databases, or WordPress sites where wp-cli / PHP is unavailable |
 
-When the `mysqldump` driver is used, credentials are stored in plain text inside the generated backup script ( the file is `chmod 700`, root-readable only ). At backup time the script writes a `umask 077` temporary `.my.cnf` and calls `mysqldump --defaults-extra-file=...`, so credentials never appear in `ps` / argv. The temporary cnf is removed after the dump.
+When the `mysqldump` driver is used, credentials are stored as literal base64 data inside the generated backup script. This is encoding, not encryption; the script remains mode700 and root-readable only. At backup time the script writes a private temporary client-options file and calls `mysqldump --defaults-extra-file=...`, keeping credentials out of the dump command's arguments. The temporary file is removed after the dump. Protect any credentials initially supplied through command-line flags from shell history and other local users.
+
+### Incremental reader boundary
+
+Live website files are read with the website owner's permissions. A checked archive is materialized in a fresh root-private directory before Restic reads it. This prevents a website directory changing into a link while a privileged backup reads it. Root-private SQL is backed up separately in the same snapshot, and existing `snapshot:/original/site/path` restore selectors continue to work.
+
+This requires temporary disk space: creation checks for three times the site's apparent size plus 64 MB free. Files are read and copied locally on each run; deduplication saves remote storage and transfer, rather than avoiding all local reads. Archives reject unsafe external links and special files instead of following them. Temporary files are private and removed on normal exit. After a machine crash, review leftover `rclone-automated-backups.*` directories before removing them.
+
+Regenerate existing jobs after upgrading. Generated cron scripts contain their reviewed helpers and do not change when the library is updated. Keep the Restic password and storage recovery credentials in an off-server company-controlled vault so a lost server can be recovered.
+
+New installations store inventory, logs and executable jobs under `/var/lib/rclone-automated-backups`, outside website roots. Run the management tool as root. Jobs and inventory must remain below operator-owned directories; a website user must not be able to replace their parent directory. Existing root-owned inventory beside the installation remains supported. If an older installation stored its state in another working directory, select it explicitly with `sudo RCLONE_BACKUP_STATE_DIR=/path/to/old/state bash config.sh`. Existing cron schedules are not moved or rewritten automatically. Never keep this tool or its generated jobs in a served website directory.
 
 `mysqldump` is invoked with `--single-transaction --quick --routines --events --triggers`. The `--single-transaction` flag provides a consistent snapshot for InnoDB tables; databases that use MyISAM tables may need `--lock-tables` instead, which can be added by editing the generated script.
 
@@ -138,15 +155,21 @@ When you restore a backup ( **Manage backups → View/restore remote backups** )
 
 How the target database is resolved:
 
-- If the target path is a real WordPress install, the tool imports into the database its own `wp-config.php` points at ( read straight from the file, not via wp-cli ), and reads the target's current site URL **before** import so it can rewrite the source URL to the target's URL afterward ( `wp search-replace` ). The target's `wp-config.php` is preserved across the file restore ( even with **Clear and restore**, it is copied aside before the directory is emptied and put back afterward ), so the import always hits the target DB and the site keeps working. If the files also moved to a different directory, absolute paths stored in the database are rewritten from the source path to the target path too. All wp-cli operations use the root CLI runtime, so a site user's cgi-fcgi PHP can't break them.
+- For an existing WordPress destination, its own `wp-config.php` and database are retained. The current destination URL is captured before import and restored with `wp search-replace`; stored filesystem paths are updated when the directory changes. WordPress runs under the destination's non-root Unix owner using the selected PHP CLI, including on hosts whose default PHP command uses CGI. A root-owned WordPress tree must have its correct site ownership restored first.
 - If the target has no `wp-config.php` ( a `files` backup, a `mysqldump` backup, or a WordPress backup landing on a fresh/empty path ), the tool prompts you for the target database name / user / password / host and imports into that database. When the restored files include a `wp-config.php` ( a WordPress backup ), it is updated with the credentials you gave so the site can connect. URL rewriting is left to you in this case.
 
-Safety guards that make an accidental live restore impossible when restoring elsewhere:
+Restore boundaries:
 
-- The target path must be an existing directory, absolute, and never `/`.
+- The target path must be an existing directory, absolute, and never `/`. Canonical paths and the destination's device/inode identity are checked before writes.
 - The restore **aborts** if the target path equals, sits inside, or contains the source path, or if the target database equals the source database.
 - The target URL must differ from the source URL ( you are re-prompted otherwise ).
 - A resolved summary ( files → path, DB → target, URL → old → new ) must be confirmed before anything is written, and the source path and database are never referenced when restoring elsewhere.
+- Archives are validated before clearing files. Extraction uses directory descriptors, rejects traversal, devices and links outside the destination, strips privilege bits and writes as the destination owner. Internal relative links and hardlinks remain supported. Existing destination symlinks cannot redirect file writes.
+- SQL dumps stay in private temporary storage, including when restoring a full archive. Database client local commands and local-file import are disabled. Explicit destination credentials are written before the database import.
+
+Pause the destination's web traffic and scheduled jobs before restoring. This generic tool does not automatically pause a hosting platform. Restoring in place is not an atomic deployment; keep the destination offline until its database, URLs, integrations and application checks pass. For a staging restore, disable outbound integrations before running copied application code.
+
+Regenerate existing scheduled jobs to apply generator changes. Updating this repository does not rewrite old cron scripts. Archive retention is limited to each job's hash; use a separate remote folder/repository per site. Missing or failed initial backups return a failure status. Local archive and encrypted incremental restore tests are included under `tests/`; successful upload alone is not a restore qualification.
 
 > Note: URL rewriting runs only when the target is a working WordPress install. For non-WordPress / explicit-credential restores the data is restored and imported, but `siteurl` / `home` are left as-is. The target install is also assumed to use the same table prefix as the backup.
 

@@ -12,11 +12,27 @@
 ############################## LOAD FUNCTIONS & VARIABLE DEFINITIONS ###############################
 ####################################################################################################
 
-# Define main paths
-CRON_SCRIPTS_DIR="cron_scripts"
-TMP_DIR="$PWD/tmp"
-DEFINITIONS_FILE="definitions"
-LOG_FILE="$PWD/backup.log"
+# New installations keep executable jobs and inventory outside website roots.
+# An existing inventory beside this trusted installation remains supported.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+if [ "$(id -u)" != 0 ]; then
+    echo 'Run this server-management tool with sudo bash config.sh.' >&2
+    exit 1
+fi
+source "$SCRIPT_DIR/lib/locking.sh"
+if [ -n "${RCLONE_BACKUP_STATE_DIR:-}" ]; then
+    STATE_DIR="$RCLONE_BACKUP_STATE_DIR"
+elif [ -f "$SCRIPT_DIR/definitions" ]; then
+    STATE_DIR="$SCRIPT_DIR"
+else
+    STATE_DIR=/var/lib/rclone-automated-backups
+fi
+prepare_operator_directory "$STATE_DIR" || exit 1
+STATE_DIR=$(realpath -e -- "$STATE_DIR")
+CRON_SCRIPTS_DIR="$STATE_DIR/cron_scripts"
+TMP_DIR="$STATE_DIR/tmp"
+DEFINITIONS_FILE="$STATE_DIR/definitions"
+LOG_FILE="$STATE_DIR/backup.log"
 CRON_FILE="/etc/cron.d/rclone-automated-backups"
 # Shared lock file: every generated backup script grabs this lock so that, no
 # matter how many cron entries fire at once, backups run strictly one-at-a-time.
@@ -47,7 +63,6 @@ RESET="\e[0m" # Reset text formatting
 
 # Resolve the directory this script lives in, so the lib/ modules load regardless
 # of the current working directory.
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Load the function modules
 source "$SCRIPT_DIR/lib/ui.sh"
@@ -113,24 +128,7 @@ wp_cli_display() {
   fi
 }
 
-run_wp_cli() {
-  if [ -n "$WP_PHP_BIN" ]; then
-    "$WP_PHP_BIN" "$WP_CLI_PATH" "$@"
-  else
-    "$WP_CLI_PATH" "$@"
-  fi
-}
-
-run_wp_cli_as() {
-  local wp_user="$1"
-  shift
-
-  if [ -n "$WP_PHP_BIN" ]; then
-    sudo -u "$wp_user" -s -- "$WP_PHP_BIN" "$WP_CLI_PATH" "$@"
-  else
-    sudo -u "$wp_user" -s -- "$WP_CLI_PATH" "$@"
-  fi
-}
+source "$(dirname "${BASH_SOURCE[0]}")/lib/wp-runtime.sh"
 
 # Disable terminal bracketed-paste mode so pasted input ( file paths, lists of
 # numbers, etc. ) is read cleanly, without the wrapping markers some terminals
@@ -141,7 +139,12 @@ run_wp_cli_as() {
 [ $# -eq 0 ] && clear_screen
 
 # Check if the definitions file exists
+if [ -L "$DEFINITIONS_FILE" ]; then
+    echo 'Backup inventory cannot be a symbolic link.' >&2
+    exit 1
+fi
 if [ -f "$DEFINITIONS_FILE" ]; then
+  validate_operator_file "$DEFINITIONS_FILE" || { echo 'Untrusted backup inventory; refusing to load it.' >&2; exit 1; }
   # Load the definitions file
   source "$DEFINITIONS_FILE"
   # Update definitions state variables
@@ -208,7 +211,7 @@ fi
 # on modern releases ( it is purely diagnostic ), and exercises the same
 # PHP-resolution path a real backup would use. `cli version --allow-root` is
 # kept as a fallback for older / stricter wp-cli builds.
-if ! run_wp_cli --info &>/dev/null && ! run_wp_cli cli version --allow-root &>/dev/null; then
+if ! ${WP_PHP_BIN:+"$WP_PHP_BIN"} "$WP_CLI_PATH" --info &>/dev/null; then
   echo -e "${RED}2b. wp-cli could not run - no usable PHP CLI binary was found.${RESET}"
   echo -e "${RED}    Install php-cli, or make sure /opt/plesk/php/*/bin/php ( Plesk )${RESET}"
   echo -e "${RED}    or /opt/cpanel/ea-php*/root/usr/bin/php ( cPanel ) exists.${RESET}"

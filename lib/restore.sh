@@ -1,4 +1,32 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/mysql-options.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/metadata.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/wp-runtime.sh"
+RESTORE_FILES_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/restore-files.py"
+
+capture_restore_identity() {
+    command -v python3 >/dev/null || { echo 'Python 3 is required for safe file restores.' >&2; return 1; }
+    RESTORE_TARGET_PATH=$(realpath -e -- "$RESTORE_TARGET_PATH") || return 1
+    RESTORE_TARGET_ID=$(python3 "$RESTORE_FILES_HELPER" identity "$RESTORE_TARGET_PATH")
+}
+
+# Validate the whole archive before clearing anything, bind writes to the
+# selected directory, and drop privileges to its owner before extracting.
+restore_archive_files() {
+    local archive="$1" clear="${2:-false}" database_hash="${3:-}"
+    local -a options=()
+    [ -n "${RESTORE_TARGET_ID:-}" ] || capture_restore_identity || return 1
+    [ "$clear" != true ] || options+=(--clear)
+    [ -z "${RESTORE_PRESERVE_WPCONFIG:-}" ] || options+=(--preserve wp-config.php)
+    if [ -n "$database_hash" ]; then
+        [[ "$database_hash" =~ ^[a-f0-9]{32}$ ]] || return 1
+        RESTORE_SQL_FILE=$(mktemp /var/tmp/rclone-restore-db.XXXXXXXXXX)
+        chmod 600 "$RESTORE_SQL_FILE"
+        python3 "$RESTORE_FILES_HELPER" archive "$RESTORE_TARGET_PATH" --identity "$RESTORE_TARGET_ID" "${options[@]}" --database-hash "$database_hash" < "$archive" 3> "$RESTORE_SQL_FILE"
+    else
+        python3 "$RESTORE_FILES_HELPER" archive "$RESTORE_TARGET_PATH" --identity "$RESTORE_TARGET_ID" "${options[@]}" < "$archive"
+    fi
+}
 
 # Restore-destination resolution for the "View/restore remote backups" flow.
 #
@@ -7,8 +35,7 @@
 # time. The latter redirects every file write and the database import to a path
 # and DB the operator specifies, and refuses to run if the resolved target
 # collides with the source path or source database. This is what lets a backup be
-# restored elsewhere ( a test copy, or a different site ) without any risk of
-# clobbering the live one.
+# restored elsewhere with explicit source/target collision checks.
 #
 # The functions here set RESTORE_* globals that lib/backup-manage.sh consumes.
 # RESTORE_MODE uses the internal token "staging" for the "another path/site" case:
@@ -73,7 +100,7 @@ resolve_origin_db_name() {
     # grep with no match on a legacy script, or wp-cli on an unreadable install —
     # so use the masked "local VAR=$(...)" form: the "local" builtin's own exit
     # status ( always 0 ) swallows the failure that would otherwise abort the tool.
-    local driver=$(grep -oP 'db_driver="\K[^"]+' "$backup_script" 2>/dev/null)
+    local driver=$(read_backup_setting "$backup_script" db_driver)
     [ -z "$driver" ] && driver="wpcli"
 
     if [ "$driver" == "mysqldump" ]; then
@@ -88,14 +115,17 @@ resolve_origin_db_name() {
 # tripped ). backup_type gates the DB/URL questions ( files-only backups carry no
 # database ).
 select_restore_destination() {
-    local origin_path="${1%/}"
+    local origin_path
+    origin_path=$(realpath -e -- "$1") || return 1
     local origin_domain="$2"
     local backup_script="$3"
     local backup_type="$4"
 
     # Reset every output so a prior selection can't leak into this one.
     RESTORE_MODE=""
+    RESTORE_SQL_FILE=""
     RESTORE_TARGET_PATH=""
+    RESTORE_TARGET_ID=""
     RESTORE_SOURCE_PATH="$origin_path"
     RESTORE_DB_MODE=""
     RESTORE_DB_NAME=""
@@ -121,7 +151,8 @@ select_restore_destination() {
         RESTORE_MODE="origin"
         RESTORE_TARGET_PATH="$origin_path"
         RESTORE_DB_MODE="origin"
-        return 0
+        capture_restore_identity
+        return $?
     elif [ "$dest_choice" != "2" ]; then
         echo -e "${RED}Invalid choice.${RESET}"
         return 1
@@ -157,6 +188,7 @@ select_restore_destination() {
     staging_wp_path=$(derive_wp_path "$staging_path")
     local effective_path="$staging_path"
     [ -n "$staging_wp_path" ] && effective_path="${staging_wp_path%/}"
+    effective_path=$(realpath -e -- "$effective_path") || return 1
 
     # Collision guard: the effective files target must not equal, sit inside, or
     # contain the origin path. Any overlap would let the clear / extract steps
@@ -168,6 +200,7 @@ select_restore_destination() {
         return 1
     fi
     RESTORE_TARGET_PATH="$effective_path"
+    capture_restore_identity || return 1
 
     local origin_db_name
     origin_db_name=$(resolve_origin_db_name "$origin_path" "$backup_script")
@@ -190,7 +223,7 @@ select_restore_destination() {
         fi
 
         # Work out a DEFAULT URL for the restored copy: the target site's own
-        # current URL. Try the validated root wp-cli, then a WP_HOME/WP_SITEURL
+        # current URL. Try the selected owner-isolated CLI, then a WP_HOME/WP_SITEURL
         # constant in wp-config.php, then the target directory name if it looks
         # like a domain. Any of these can be empty; that just means no default.
         local default_url=""
@@ -273,6 +306,7 @@ select_restore_destination() {
         ;;
     esac
     echo -e "${YELLOW}The target contents will be overwritten. The source ( live ) site is NOT touched.${RESET}"
+    echo 'Pause destination web traffic and scheduled jobs before proceeding. This tool does not pause your hosting platform.'
     echo ""
     read -p "$(echo -e "${BOLD}${BLUE}Proceed with this restore? (y/n): ${RESET}")" confirm_dest
     if [[ "${confirm_dest,,}" != "y" && "${confirm_dest,,}" != "yes" ]]; then
@@ -290,9 +324,10 @@ stash_staging_wpconfig() {
     [ -z "$RESTORE_PRESERVE_WPCONFIG" ] && return 0
     [ ! -f "$RESTORE_PRESERVE_WPCONFIG" ] && return 0
 
-    sudo mkdir -p "$TMP_DIR"
-    RESTORE_WPCONFIG_STASH="${TMP_DIR}/wp-config.staging.$$.php"
-    sudo cp -p "$RESTORE_PRESERVE_WPCONFIG" "$RESTORE_WPCONFIG_STASH"
+    [ -n "${RESTORE_TARGET_ID:-}" ] || capture_restore_identity || return 1
+    RESTORE_WPCONFIG_STASH=$(mktemp /var/tmp/rclone-restore-config.XXXXXXXXXX)
+    chmod 600 "$RESTORE_WPCONFIG_STASH"
+    python3 "$RESTORE_FILES_HELPER" read "$RESTORE_TARGET_PATH" --identity "$RESTORE_TARGET_ID" --name wp-config.php > "$RESTORE_WPCONFIG_STASH"
 }
 
 # Put the staging wp-config.php back after the file restore, so the DB import and
@@ -301,7 +336,7 @@ restore_staging_wpconfig() {
     [ -z "$RESTORE_WPCONFIG_STASH" ] && return 0
     [ ! -f "$RESTORE_WPCONFIG_STASH" ] && return 0
 
-    sudo cp -p "$RESTORE_WPCONFIG_STASH" "$RESTORE_PRESERVE_WPCONFIG"
+    python3 "$RESTORE_FILES_HELPER" write "$RESTORE_TARGET_PATH" --identity "$RESTORE_TARGET_ID" --name wp-config.php < "$RESTORE_WPCONFIG_STASH" || return 1
     sudo rm -f "$RESTORE_WPCONFIG_STASH"
 }
 
@@ -322,10 +357,13 @@ run_restore_db_import() {
     # database place it there, and the incremental subpath restore lands it at the
     # root ), so cap the search at depth 1 — no walking the whole site tree, and no
     # risk of matching a stray dump buried in uploads.
-    local sql_file=$(find "$RESTORE_TARGET_PATH" -maxdepth 1 -type f -name "*${backup_hash}_*.sql" -print -quit)
+    local sql_file="${RESTORE_SQL_FILE:-}"
     if [ -z "$sql_file" ]; then
-        echo -e "${YELLOW}No SQL dump found under ${RESTORE_TARGET_PATH}; skipping database import.${RESET}"
-        return 0
+        sql_file=$(find "$RESTORE_TARGET_PATH" -maxdepth 1 -type f -name "*${backup_hash}_*.sql" -print -quit)
+    fi
+    if [ -z "$sql_file" ] || [ ! -f "$sql_file" ] || [ -L "$sql_file" ]; then
+        echo -e "${RED}Required SQL dump missing under ${RESTORE_TARGET_PATH}; database restore failed.${RESET}" >&2
+        return 1
     fi
 
     echo ""
@@ -333,35 +371,35 @@ run_restore_db_import() {
 
     case "$RESTORE_DB_MODE" in
     explicit)
+        # Rewrite the restored source credentials before importing anything.
+        # A failed configuration edit must leave the database untouched.
+        if [ -f "$RESTORE_TARGET_PATH/wp-config.php" ]; then
+            run_wp_cli config set DB_NAME "$RESTORE_DB_NAME" --path="$RESTORE_TARGET_PATH" --type=constant --quiet || return 1
+            run_wp_cli config set DB_USER "$RESTORE_DB_USER" --path="$RESTORE_TARGET_PATH" --type=constant --quiet || return 1
+            run_wp_cli config set DB_PASSWORD "$RESTORE_DB_PASS" --path="$RESTORE_TARGET_PATH" --type=constant --quiet || return 1
+            run_wp_cli config set DB_HOST "$RESTORE_DB_HOST" --path="$RESTORE_TARGET_PATH" --type=constant --quiet || return 1
+        fi
         local my_cnf
         my_cnf=$(mktemp)
         chmod 600 "$my_cnf"
-        printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "$RESTORE_DB_USER" "$RESTORE_DB_PASS" "$RESTORE_DB_HOST" >"$my_cnf"
-        sudo mysql --defaults-extra-file="$my_cnf" "$RESTORE_DB_NAME" <"$sql_file"
+        mysql_client_options "$RESTORE_DB_USER" "$RESTORE_DB_PASS" "$RESTORE_DB_HOST" >"$my_cnf"
+        if ! sudo mysql --defaults-extra-file="$my_cnf" --binary-mode=1 --local-infile=0 -- "$RESTORE_DB_NAME" <"$sql_file"; then
+            rm -f "$my_cnf"
+            return 1
+        fi
         rm -f "$my_cnf"
 
-        # If the restored files include a wp-config.php ( a WordPress backup landed
-        # on a fresh path ), point it at the credentials just used so the site can
-        # actually connect — the archive carried the SOURCE site's credentials.
-        # "wp config set" edits the file only; it needs no database connection.
-        if [ -f "$RESTORE_TARGET_PATH/wp-config.php" ]; then
-            echo -e "${YELLOW}Updating wp-config.php with the target database credentials ...${RESET}"
-            run_wp_cli config set DB_NAME "$RESTORE_DB_NAME" --path="$RESTORE_TARGET_PATH" --type=constant --allow-root || true
-            run_wp_cli config set DB_USER "$RESTORE_DB_USER" --path="$RESTORE_TARGET_PATH" --type=constant --allow-root || true
-            run_wp_cli config set DB_PASSWORD "$RESTORE_DB_PASS" --path="$RESTORE_TARGET_PATH" --type=constant --allow-root || true
-            run_wp_cli config set DB_HOST "$RESTORE_DB_HOST" --path="$RESTORE_TARGET_PATH" --type=constant --allow-root || true
-        fi
         ;;
     wpconfig)
         # Import through the target site's own wp-config.php, using the validated
-        # root wp-cli runtime so the site user's cgi-fcgi php can't break it.
-        run_wp_cli db import "${sql_file}" --path="${RESTORE_TARGET_PATH}" --allow-root --skip-plugins --skip-themes
+        # selected CLI runtime under the destination's non-root Unix owner.
+        run_wp_cli db import - --binary-mode=1 --local-infile=0 --path="${RESTORE_TARGET_PATH}" --skip-plugins --skip-themes < "$sql_file" || return 1
         ;;
     origin)
         # Original behaviour: dispatch on the driver baked into the backup script.
         # Masked "local VAR=$(...)" captures keep a no-match grep from aborting the
         # tool under set -e ( legacy scripts have no db_driver= line ).
-        local backup_db_driver=$(grep -oP 'db_driver="\K[^"]+' "$backup_script" 2>/dev/null)
+        local backup_db_driver=$(read_backup_setting "$backup_script" db_driver)
         [ -z "$backup_db_driver" ] && backup_db_driver="wpcli"
 
         if [ "$backup_db_driver" == "mysqldump" ]; then
@@ -375,24 +413,63 @@ run_restore_db_import() {
             local backup_db_host=$(grep -oP '^db_host_b64=\K.*' "$backup_script" | base64 -d)
             local my_cnf=$(mktemp)
             chmod 600 "$my_cnf"
-            printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "$backup_db_user" "$backup_db_pass" "$backup_db_host" >"$my_cnf"
-            sudo mysql --defaults-extra-file="$my_cnf" "$backup_db_name" <"$sql_file"
+            mysql_client_options "$backup_db_user" "$backup_db_pass" "$backup_db_host" >"$my_cnf"
+            if ! sudo mysql --defaults-extra-file="$my_cnf" --binary-mode=1 --local-infile=0 -- "$backup_db_name" <"$sql_file"; then
+                rm -f "$my_cnf"
+                return 1
+            fi
             rm -f "$my_cnf"
         else
-            run_wp_cli db import "${sql_file}" --path="${RESTORE_TARGET_PATH}" --allow-root --skip-plugins --skip-themes
+            run_wp_cli db import - --binary-mode=1 --local-infile=0 --path="${RESTORE_TARGET_PATH}" --skip-plugins --skip-themes < "$sql_file" || return 1
         fi
+        ;;
+    *)
+        echo 'Unknown database restore mode; refusing import.' >&2
+        return 1
         ;;
     esac
 
     sudo rm "$sql_file"
+    RESTORE_SQL_FILE=""
+}
+
+# Read generated metadata without sourcing a script that can execute arbitrary
+# commands. Legacy scripts remain readable so existing snapshots are recoverable.
+read_restic_password() {
+    local encoded
+    encoded=$(sed -n 's/^restic_password_b64=//p' "$1")
+    if [ -n "$encoded" ]; then
+        printf '%s' "$encoded" | base64 -d
+    else
+        sed -n 's/^restic_password=//p' "$1" | sed 's/^"//;s/"$//'
+    fi
+}
+
+# New snapshots keep SQL outside the document root. Restore that single file to
+# a private temporary file; never restore the snapshot's arbitrary absolute paths.
+restore_incremental_database_file() {
+    local backup_script="$1" snapshot="$2" repository="$3" password="$4"
+    local dump_path
+    dump_path=$(sed -n 's/^db_snapshot_path="\([^"]*\)"$/\1/p' "$backup_script")
+    [ -z "$dump_path" ] && return 0
+    if [[ ! "$dump_path" =~ ^/var/lib/rclone-automated-backups/dumps/[a-f0-9]{32}/database\.sql$ ]]; then
+        echo 'Invalid private database snapshot path.' >&2
+        return 1
+    fi
+    RESTORE_SQL_FILE=$(mktemp /var/tmp/rclone-restore-db.XXXXXXXXXX)
+    chmod 600 "$RESTORE_SQL_FILE"
+    if ! RESTIC_PASSWORD="$password" sudo --preserve-env=RESTIC_PASSWORD restic -r "$repository" dump "$snapshot" "$dump_path" > "$RESTORE_SQL_FILE"; then
+        rm -f "$RESTORE_SQL_FILE"
+        RESTORE_SQL_FILE=""
+        return 1
+    fi
 }
 
 # After the import, rewrite the WordPress URL from the source's ( which the
 # import just wrote into the DB ) to the target URL captured earlier, so the
 # restored copy stops referencing the live domain. Only runs for a WordPress
 # target imported via wp-config; explicit / non-WP restores leave URLs alone.
-# All wp-cli calls use the validated root runtime so a site user's cgi-fcgi php
-# can't break them.
+# WP-CLI uses the selected CLI binary under the destination's non-root owner.
 maybe_wp_search_replace() {
     if [ "$RESTORE_MODE" != "staging" ]; then
         return 0
@@ -425,19 +502,19 @@ maybe_wp_search_replace() {
     # so surface it loudly rather than letting set -e tear the whole tool down.
     if ! run_wp_cli search-replace "$RESTORE_URL_OLD" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes; then
         echo -e "${RED}URL rewrite failed. The restored copy may still reference ${RESTORE_URL_OLD}; fix it before using the site.${RESET}"
-        return 0
+        return 1
     fi
     # siteurl/home live in the options table; set them explicitly as a belt-and-
     # suspenders in case search-replace skipped a serialized edge case.
-    run_wp_cli option update siteurl "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || true
-    run_wp_cli option update home "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || true
+    run_wp_cli option update siteurl "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || return 1
+    run_wp_cli option update home "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || return 1
 
     # When the files also moved to a different directory, rewrite any absolute
     # filesystem paths the database carries ( some plugins / caches store ABSPATH
     # or upload paths ). Harmless when the paths match ( skipped ) or absent.
     if [ -n "$RESTORE_SOURCE_PATH" ] && [ "$RESTORE_SOURCE_PATH" != "$RESTORE_TARGET_PATH" ]; then
         echo -e "${YELLOW}Rewriting stored paths ${RESTORE_SOURCE_PATH} -> ${RESTORE_TARGET_PATH} ...${RESET}"
-        run_wp_cli search-replace "$RESTORE_SOURCE_PATH" "$RESTORE_TARGET_PATH" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes || true
+        run_wp_cli search-replace "$RESTORE_SOURCE_PATH" "$RESTORE_TARGET_PATH" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes || return 1
     fi
 
     run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true

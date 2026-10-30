@@ -1,6 +1,12 @@
 #!/bin/bash
 
 # Backup creation: settings collection and backup-script generation
+source "$(dirname "${BASH_SOURCE[0]}")/mysql-options.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/locking.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/notifications.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/metadata.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/archive.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/remote-probe.sh"
 
 # Detect cache / junk folders and files that are safe to exclude from a backup.
 # Echoes newline-separated relative paths that actually exist under <site_path>.
@@ -496,6 +502,14 @@ create_backup_from_settings() {
     local lock_timeout="${LOCK_TIMEOUT}"
     # wp-cli phar path, baked in; the script re-resolves PHP itself at run time
     local wp_cli_path="${WP_CLI_PATH}"
+    local backup_php_binary="${BACKUP_PHP_BINARY:-}"
+    if [ -n "$backup_php_binary" ]; then
+        if [[ "$backup_php_binary" != /* || ! -x "$backup_php_binary" ]] ||
+           ! "$backup_php_binary" -v 2>/dev/null | head -1 | grep -q '(cli)'; then
+            echo 'The selected PHP binary must be an executable absolute path to PHP CLI.' >&2
+            return 1
+        fi
+    fi
     # Database driver and ( for mysqldump ) credentials. Defaults to wpcli so a
     # backup created before this knob existed has the same behavior. Credentials
     # are written into the script via printf %s outside the heredoc so values
@@ -547,7 +561,7 @@ create_backup_from_settings() {
     fi
 
     # Validate backup_time
-    if [ -z "$backup_time" ] || [[ ! "$backup_time" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
+    if [ -z "$backup_time" ] || [[ ! "$backup_time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
         [ "$mode" == "interactive" ] && clear_screen "force"
         echo -e "${RED}A valid backup time must selected from the available options.${RESET}" >&2
         return 1
@@ -624,14 +638,16 @@ create_backup_from_settings() {
         for item in "${excluded_items_array[@]}"; do
             # Remove leading and trailing spaces
             item=$(echo "$item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            case "/$item/" in
+                //|//*|*/../*|*/./*)
+                    echo 'Exclusions must be relative paths inside the site.' >&2
+                    return 1 ;;
+            esac
             # Check if the item exists under the backup_domain path
             if [ -e "${backup_path}/${item}" ]; then
-                # Wrap the item in double quotes and add it to excludes
-                if [ $remote_backup_type == "incremental" ]; then
-                    excludes+=" --exclude=\"${backup_path}/${item}\""
-                else
-                    excludes+=" --exclude=\"${item}\""
-                fi
+                # Every file reader now runs relative to the selected site.
+                printf -v item '%q' "--exclude=${item}"
+                excludes+=" $item"
 
             else
                 echo -e "${YELLOW}Warning: excluded location '${item}' does not exist under '${backup_path}'. Skipping...${RESET}"
@@ -660,7 +676,7 @@ create_backup_from_settings() {
             read -p "$(echo -e "${BOLD}${BLUE}Type the name of one of the available remotes as your backup destination (eg; ${remotes_list}): ${RESET}")" rclone_remote_name
 
             # Check if the entered remote name exists
-            if rclone listremotes | grep -q "${rclone_remote_name}:"; then
+            if rclone listremotes | grep -Fxq -- "${rclone_remote_name}:"; then
                 break # Remote name is valid, exit the loop
             else
                 echo -e "${YELLOW}The remote you entered doesn't exist, please try again.${RESET}"
@@ -669,7 +685,7 @@ create_backup_from_settings() {
     else
         # Headless: the remote was provided via --remote
         rclone_remote_name="${BACKUP_REMOTE}"
-        if ! rclone listremotes | grep -q "${rclone_remote_name}:"; then
+        if ! rclone listremotes | grep -Fxq -- "${rclone_remote_name}:"; then
             echo "Error: rclone remote '${rclone_remote_name}' does not exist." >&2
             return 1
         fi
@@ -678,63 +694,23 @@ create_backup_from_settings() {
     # Remember the chosen remote so the repeat-command hint can reference it
     BACKUP_REMOTE="$rclone_remote_name"
 
-    # Validate the rclone remote by writing a test file
-    while [ $rclone_remote_valid == false ]; do
-        sudo touch wpali.com.txt >/dev/null 2>&1
-        # Run the rclone copy command and capture its exit code
-        sudo rclone copy wpali.com.txt "${rclone_remote_name}":"${remote_backup_location}"
-        exit_code=$?
-
-        # Confirm the file has been created successfully on remote server
-        if [ $exit_code -eq 0 ]; then
-            if [ "$mode" == "interactive" ]; then
-                # Get the rclone remote name that we'll use for the back up with this cron job
-                echo ""
-                echo -e "${GREEN}We have created a test file on your remote location.${RESET}"
-                echo -e "Please go to ${BOLD}"$remote_backup_location"${RESET} on your remote server and check if this file ${BOLD}"wpali.com.txt"${RESET} exists."
-                echo ""
-                read -p "$(echo -e "${BOLD}${BLUE}Do you confirm that the test file has been created succesfully on your remote server? (y/n): ${RESET}")" rclone_remote_push_success
-
-                if [[ -n "$rclone_remote_push_success" && ("${rclone_remote_push_success,,}" == "y" || "${rclone_remote_push_success,,}" == "yes") ]]; then
-                    # Copy was successful
-                    rclone_remote_valid=true
-                    # Delete leftovers
-                    sudo rm wpali.com.txt
-                    sudo rclone delete "${rclone_remote_name}":"${remote_backup_location}wpali.com.txt"
-                fi
-            else
-                # Headless: confirm the test file actually appears on the remote
-                # ( the automated equivalent of the interactive y/n confirmation -
-                # catches a misconfigured bucket/path that rclone copy still exits 0 on )
-                if sudo rclone lsf "${rclone_remote_name}":"${remote_backup_location}" 2>/dev/null | grep -qx "wpali.com.txt"; then
-                    rclone_remote_valid=true
-                    sudo rm wpali.com.txt
-                    sudo rclone delete "${rclone_remote_name}":"${remote_backup_location}wpali.com.txt"
-                else
-                    echo "Error: the rclone test file did not appear at '${rclone_remote_name}:${remote_backup_location}'." >&2
-                    sudo rm wpali.com.txt
-                    break
-                fi
-            fi
-        else
-            # Copy failed, display relevant errors
-            echo -e "${RED}rclone copy failed with exit code $exit_code${RESET}" >&2
-            break
-        fi
-    done
+    if verify_rclone_destination "$rclone_remote_name" "$remote_backup_location"; then
+        rclone_remote_valid=true
+        echo 'Remote backup destination passed write, read-back and cleanup checks.'
+    else
+        echo 'Error: the remote backup destination could not be verified.' >&2
+    fi
 
     # Prepare the backup script and cron job based on frequency, time and the other options.
     if [ $rclone_remote_valid == true ]; then
 
         # Check if the cron scripts directory exists, and create it if it doesn't
-        if [ ! -d "$CRON_SCRIPTS_DIR" ]; then
-            mkdir -p "$CRON_SCRIPTS_DIR"
-        fi
+        prepare_operator_directory "$CRON_SCRIPTS_DIR" || return 1
 
         # Generate a unique name for the backup script based on the frequency and time
         local creation_date=$(date +'%Y-%m-%d %H:%M:%S')
         local script_prefix=$(echo -n "$creation_date-$backup_domain-$cron_expression-$retention_period-$remote_backup_location-$rclone_remote_name-$remote_backup_type" | md5sum | awk '{print $1}') # used to prefix the backup script
-        local script_name="${script_prefix}_${backup_domain//./-}_${backup_time//:/-}_${backup_frequency}_to_${rclone_remote_name}"
+        local script_name="${script_prefix}_${backup_time//:/-}_${backup_frequency}"
         local script_path="$CRON_SCRIPTS_DIR/$script_name"
         local script_hash=$(echo -n "$script_name" | md5sum | awk '{print $1}') # Use to prefix backups
 
@@ -747,7 +723,7 @@ create_backup_from_settings() {
         # Initialize restic if this is an incremental backup
         if [ $remote_backup_type == "incremental" ]; then
             # Check if a restic repository already exists in the remote location
-            local restic_remote_config_output=$(sudo RESTIC_PASSWORD="${restic_password}" restic -r "rclone:${rclone_remote_name}:${remote_backup_location}" cat config 2>&1)
+            local restic_remote_config_output=$(RESTIC_PASSWORD="${restic_password}" sudo --preserve-env=RESTIC_PASSWORD restic -r "rclone:${rclone_remote_name}:${remote_backup_location}" cat config 2>&1)
             if echo "$restic_remote_config_output" | grep -q "Is there a repository at the following location"; then
 
                 echo ""
@@ -755,7 +731,7 @@ create_backup_from_settings() {
                 echo ""
 
                 # If there are no errors, initialize the repo
-                sudo RESTIC_PASSWORD="${restic_password}" restic -r "rclone:${rclone_remote_name}:${remote_backup_location}" init
+                RESTIC_PASSWORD="${restic_password}" sudo --preserve-env=RESTIC_PASSWORD restic -r "rclone:${rclone_remote_name}:${remote_backup_location}" init
                 # Check the exit status of the previous command
                 if [ $? -ne 0 ]; then
                     # The restic init command failed, we'll bail out to avoid creating a non-valid backup script
@@ -773,6 +749,12 @@ create_backup_from_settings() {
             fi
 
         fi
+        # Credentials must never be readable between creation and the final chmod.
+        if [ -L "$script_path" ]; then
+            echo "Refusing a symbolic-link backup script destination." >&2
+            return 1
+        fi
+        (umask 077; : > "$script_path") || return 1
         # Add the starting content for the backup script (eg; variables..etc)
         cat <<EOF >"$script_path"
 #!/bin/bash
@@ -784,55 +766,86 @@ else
     call_type="backup"
 fi
 
-# Exit script on error, only if this is not a pre-restore backup
-if [ \${call_type} != "restore" ]; then
-    set -e
-fi
+# A failed pre-restore backup must also abort; it is the restore safety boundary.
+set -e
+set -o pipefail
+umask 077
 
-tmp_path=$TMP_DIR
+$(declare -f mysql_option_quote mysql_client_options)
+$(declare -f prepare_backup_lock)
+$(declare -f read_notification_email)
+$(declare -f run_site_reader create_site_tar create_site_archive create_incremental_tree)
 
-# Check if the tmp folder exists, and if not, create it
-if [ ! -d "\${tmp_path}" ]; then
-    sudo mkdir -p "\${tmp_path}"
-fi
+# Bind the reviewed descriptor-based reader to this standalone generated job.
+BACKUP_EXTRACTOR_B64=$(base64 -w0 "$(dirname "${BASH_SOURCE[0]}")/restore-files.py")
 
-# Find and delete any 'tar.gz.tmp', 'sql' or 'sql.gz.tmp' files that are older than 48 hours ( failed backups )
-sudo find "\${tmp_path}" -type f -name "*.tar.gz.tmp" -mmin +2880 -exec rm {} \;
-sudo find "\${tmp_path}" -type f -name "*.sql" -mmin +2880 -exec rm {} \;
-sudo find "\${tmp_path}" -type f -name "*.sql.gz.tmp" -mmin +2880 -exec rm {} \;
+# Values are encoded as literal data, including paths containing shell syntax.
+LOG_FILE_b64=$(printf '%s' "$LOG_FILE" | base64 -w0)
+LOG_FILE=\$(printf '%s' "\${LOG_FILE_b64}" | base64 -d)
+LOCK_FILE_b64=$(printf '%s' "$LOCK_FILE" | base64 -w0)
+LOCK_FILE=\$(printf '%s' "\${LOCK_FILE_b64}" | base64 -d)
+COMPAT_LOCK_FILE_b64=$(printf '%s' "$COMPAT_LOCK_FILE" | base64 -w0)
+COMPAT_LOCK_FILE=\$(printf '%s' "\${COMPAT_LOCK_FILE_b64}" | base64 -d)
 
-# Make sure out logs files doesn't get too big
-if [ -f "$LOG_FILE" ]; then
-    # Get the current size of the log file in bytes
-    log_file_size=\$(stat -c %s "$LOG_FILE")
-    log_file_max_size=1048576 # 1MB
-
-    # Check if the log file size exceeds the maximum size ( 1048576 == 1MB )
-    if [ "\${log_file_size}" -gt "\${log_file_max_size}" ]; then
-        # Truncate the log file to the maximum size
-        tail -c "\${log_file_max_size}" "$LOG_FILE" > "$LOG_FILE.tmp"
-        mv "$LOG_FILE.tmp" "$LOG_FILE"
+# Never stage archives in the installation directory, which may itself be served
+# by a web server. Every run owns a fresh private directory, with no shared sweep.
+tmp_path=\$(mktemp -d /var/tmp/rclone-automated-backups.XXXXXXXXXX)
+wp_owner_directory=""
+backup_cleanup() {
+    local rc=\$?
+    trap - EXIT
+    if declare -F backup_failure_notify >/dev/null; then
+        backup_failure_notify "\$rc"
     fi
-fi
+    if [ "\${wp_owner_directory}" = "/var/lib/rclone-automated-backups/dumps/\${hash:-}" ] &&
+       [ ! -L "\${wp_owner_directory}" ]; then
+        rm -f -- "\${wp_owner_directory}/database.sql"
+    fi
+    case "\${wp_owner_directory}" in
+        /var/tmp/rclone-automated-backups-db.*)
+            [ ! -L "\${wp_owner_directory}" ] && rm -rf -- "\${wp_owner_directory}" ;;
+    esac
+    case "\${tmp_path}" in
+        /var/tmp/rclone-automated-backups.*)
+            [ ! -L "\${tmp_path}" ] && rm -rf -- "\${tmp_path}" ;;
+    esac
+    exit "\$rc"
+}
+trap backup_cleanup EXIT
 
-# Save all errors automatically in our logs file
-exec >> "$LOG_FILE" 2>&1
+# Logs can contain private database errors. Validate before opening, and retain
+# the inode so queued jobs cannot keep writing into a discarded rotated file.
+prepare_backup_lock "\${LOG_FILE}"
+chmod 600 -- "\${LOG_FILE}"
+exec >> "\${LOG_FILE}" 2>&1
 
 # Prepare main variables
-type="${remote_backup_type}"
-hash="${script_hash}"
-creation_date="${creation_date}"
-cron_expression="${cron_expression}"
-schedule="${schedule}"
-schedule_label="${schedule_label}"
-domain="${backup_domain}"
-domain_path="${backup_path}"
-retention_period=${retention_period}
-rclone_remote="${rclone_remote_name}"
-remote_backup_location="${remote_backup_location}"
+type_b64=$(printf '%s' "$remote_backup_type" | base64 -w0)
+type=\$(printf '%s' "\${type_b64}" | base64 -d)
+hash_b64=$(printf '%s' "$script_hash" | base64 -w0)
+hash=\$(printf '%s' "\${hash_b64}" | base64 -d)
+creation_date_b64=$(printf '%s' "$creation_date" | base64 -w0)
+creation_date=\$(printf '%s' "\${creation_date_b64}" | base64 -d)
+cron_expression_b64=$(printf '%s' "$cron_expression" | base64 -w0)
+cron_expression=\$(printf '%s' "\${cron_expression_b64}" | base64 -d)
+schedule_b64=$(printf '%s' "$schedule" | base64 -w0)
+schedule=\$(printf '%s' "\${schedule_b64}" | base64 -d)
+schedule_label_b64=$(printf '%s' "$schedule_label" | base64 -w0)
+schedule_label=\$(printf '%s' "\${schedule_label_b64}" | base64 -d)
+domain_b64=$(printf '%s' "$backup_domain" | base64 -w0)
+domain=\$(printf '%s' "\${domain_b64}" | base64 -d)
+domain_path_b64=$(printf '%s' "$backup_path" | base64 -w0)
+domain_path=\$(printf '%s' "\${domain_path_b64}" | base64 -d)
+retention_period_b64=$(printf '%s' "$retention_period" | base64 -w0)
+retention_period=\$(printf '%s' "\${retention_period_b64}" | base64 -d)
+rclone_remote_b64=$(printf '%s' "$rclone_remote_name" | base64 -w0)
+rclone_remote=\$(printf '%s' "\${rclone_remote_b64}" | base64 -d)
+remote_backup_location_b64=$(printf '%s' "$remote_backup_location" | base64 -w0)
+remote_backup_location=\$(printf '%s' "\${remote_backup_location_b64}" | base64 -d)
 # Database driver: wpcli ( reads wp-config.php ) or mysqldump ( uses the
 # credentials baked further below via printf %s ).
-db_driver="${db_driver}"
+db_driver_b64=$(printf '%s' "$db_driver" | base64 -w0)
+db_driver=\$(printf '%s' "\${db_driver_b64}" | base64 -d)
 timestamp=\$(date +'%Y-%m-%d %H:%M:%S')
 backup_date=\$(date +'%d-%m-%Y_%H-%M')
 
@@ -840,14 +853,20 @@ backup_date=\$(date +'%d-%m-%Y_%H-%M')
 # may need an explicit PHP binary because no php command is exposed on PATH, or
 # ( cPanel's case ) the php on PATH is cgi-fcgi and wp-cli rejects it. We always
 # require the CLI SAPI - "(cli)" must appear in php -v's first line.
-wp_cli="${wp_cli_path}"
-wp_php=""
+wp_cli_b64=$(printf '%s' "$wp_cli_path" | base64 -w0)
+wp_cli=\$(printf '%s' "\${wp_cli_b64}" | base64 -d)
+wp_php=$(printf '%q' "$backup_php_binary")
 _is_cli_php() {
     [ -x "\$1" ] && "\$1" -v 2>/dev/null | head -1 | grep -q '(cli)'
 }
 php_on_path=""
 command -v php >/dev/null 2>&1 && php_on_path=\$(command -v php)
-if [ -n "\${php_on_path}" ] && _is_cli_php "\${php_on_path}"; then
+if [ -n "\${wp_php}" ]; then
+    if ! _is_cli_php "\${wp_php}"; then
+        echo 'The configured site PHP CLI is unavailable. Backup stopped rather than changing PHP versions.' >&2
+        exit 1
+    fi
+elif [ -n "\${php_on_path}" ] && _is_cli_php "\${php_on_path}"; then
     : # PATH php is CLI - leave wp_php empty so wp's shebang finds it
 else
     php_candidates=""
@@ -866,12 +885,20 @@ unset -f _is_cli_php
 run_wp_cli_as() {
     local wp_user="\$1"
     shift
-
-    if [ -n "\${wp_php}" ]; then
-        sudo -u "\${wp_user}" -s -- "\${wp_php}" "\${wp_cli}" "\$@"
-    else
-        sudo -u "\${wp_user}" -s -- "\${wp_cli}" "\$@"
+    if [ "\$(id -u "\${wp_user}")" -eq 0 ]; then
+        echo 'WordPress backups require a non-root site owner.' >&2
+        return 1
     fi
+    # Child processes such as mysqldump need a working directory the site user
+    # can traverse; root's installation directory is commonly inaccessible.
+    (
+        cd "\${domain_path}" || exit 1
+        if [ -n "\${wp_php}" ]; then
+            sudo -u "\${wp_user}" -- "\${wp_php}" "\${wp_cli}" "\$@"
+        else
+            sudo -u "\${wp_user}" -- "\${wp_cli}" "\$@"
+        fi
+    )
 }
 
 # wp-cli and PHP are only needed when the database step uses the wp-cli driver.
@@ -879,39 +906,39 @@ run_wp_cli_as() {
 # the guards in those cases.
 if [ "\${type}" != "files" ] && [ "\${db_driver}" != "mysqldump" ]; then
     if [ ! -f "\${wp_cli}" ]; then
-        echo "[\${timestamp}] ERROR: wp-cli not found at '\${wp_cli}'. Aborting backup." >> "$LOG_FILE"
+        echo "[\${timestamp}] ERROR: wp-cli not found at '\${wp_cli}'. Aborting backup." >> "\${LOG_FILE}"
         exit 1
     fi
 
     if [ -z "\${wp_php}" ] && ! command -v php >/dev/null 2>&1; then
-        echo "[\${timestamp}] ERROR: PHP is not on PATH and no fallback binary was found under /opt/plesk/php, /opt/cpanel/ea-php*/root/usr/bin, /usr/local/bin, or /usr/bin. Aborting backup." >> "$LOG_FILE"
+        echo "[\${timestamp}] ERROR: PHP is not on PATH and no fallback binary was found under /opt/plesk/php, /opt/cpanel/ea-php*/root/usr/bin, /usr/local/bin, or /usr/bin. Aborting backup." >> "\${LOG_FILE}"
         exit 1
     fi
 fi
 
 # Email a failure alert if this backup exits with an error ( one alert per failed run ).
 # The address is read from the definitions file at run time, so it can be changed centrally.
-definitions_file="$PWD/$DEFINITIONS_FILE"
+definitions_file_b64=$(printf '%s' "$PWD/$DEFINITIONS_FILE" | base64 -w0)
+definitions_file=\$(printf '%s' "\${definitions_file_b64}" | base64 -d)
 backup_failure_notify() {
-    local rc=\$?
+    local rc=\$1
     set +e
     [ \$rc -eq 0 ] && return
     local notify_email=""
-    [ -f "\${definitions_file}" ] && notify_email=\$(grep -oP 'NOTIFY_EMAIL="\K[^"]*' "\${definitions_file}" 2>/dev/null)
+    notify_email=\$(read_notification_email "\${definitions_file}" 2>/dev/null) || return
     [ -z "\${notify_email}" ] && return
     local subject="[Backup FAILED] \${domain} (\${type})"
     local mail_body="Automated \${type} backup for '\${domain}' failed with exit code \${rc}.
 Server time: \$(date)
 
 --- last 30 log lines ---
-\$(tail -n 30 "$LOG_FILE" 2>/dev/null)"
+\$(tail -n 30 "\${LOG_FILE}" 2>/dev/null)"
     if command -v mail >/dev/null 2>&1; then
         printf '%s\n' "\${mail_body}" | mail -s "\${subject}" "\${notify_email}"
     elif command -v sendmail >/dev/null 2>&1; then
         printf 'Subject: %s\nTo: %s\n\n%s\n' "\${subject}" "\${notify_email}" "\${mail_body}" | sendmail -t
     fi
 }
-trap backup_failure_notify EXIT
 
 # A "last day of month" schedule runs daily but only acts on the month's final
 # day. Only scheduled cron runs ( call_type=backup ) are skipped - the initial
@@ -929,21 +956,27 @@ fi
 # old in-flight scripts via the shared legacy file and with peer new scripts
 # via either file. The order ( COMPAT then NEW ) is fixed across every caller
 # to prevent AB-BA deadlock.
-exec {lock_fd_compat}>"$COMPAT_LOCK_FILE"
-exec {lock_fd}>"$LOCK_FILE"
+prepare_backup_lock "\${COMPAT_LOCK_FILE}"
+prepare_backup_lock "\${LOCK_FILE}"
+exec {lock_fd_compat}<>"\${COMPAT_LOCK_FILE}"
+exec {lock_fd}<>"\${LOCK_FILE}"
 if ! flock -n "\${lock_fd_compat}" || ! flock -n "\${lock_fd}"; then
-    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP QUEUED (\${type}): waiting for another backup to finish for '\${domain}'" >> "$LOG_FILE"
+    echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP QUEUED (\${type}): waiting for another backup to finish for '\${domain}'" >> "\${LOG_FILE}"
     if ! flock -w $lock_timeout "\${lock_fd_compat}" || ! flock -w $lock_timeout "\${lock_fd}"; then
-        echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP SKIPPED (\${type}): lock busy, timed out for '\${domain}'" >> "$LOG_FILE"
-        # A pre-restore backup that cannot run must fail so the caller aborts the
-        # restore; a scheduled run just skips this cycle without an alert.
-        [ "\${call_type}" = "restore" ] && exit 1
-        exit 0
+        echo "[\$(date +'%Y-%m-%d %H:%M:%S')] BACK UP SKIPPED (\${type}): lock busy, timed out for '\${domain}'" >> "\${LOG_FILE}"
+        # A missed scheduled backup is also a failure and must reach monitoring.
+        exit 75
     fi
 fi
 
-echo "[\${timestamp}] BACK UP STARTED (\${type}): Performing $backup_time $backup_frequency backup for '\${domain}'" >> "$LOG_FILE"
-echo "[\${timestamp}] - Exporting database" >> "$LOG_FILE"
+# Rotate after obtaining the shared backup lock, using this run's private path.
+if [ "\$(stat -c %s -- "\${LOG_FILE}")" -gt 1048576 ]; then
+    tail -c 1048576 -- "\${LOG_FILE}" > "\${tmp_path}/log-tail"
+    cat "\${tmp_path}/log-tail" > "\${LOG_FILE}"
+fi
+
+echo "[\${timestamp}] BACK UP STARTED (\${type}): Performing $backup_time $backup_frequency backup for '\${domain}'" >> "\${LOG_FILE}"
+echo "[\${timestamp}] - Exporting database" >> "\${LOG_FILE}"
 
 EOF
 
@@ -984,52 +1017,59 @@ CREDS_DECODE
 
         # Append to the script based on the backup type
         if [ $remote_backup_type == "incremental" ]; then
-            # Add the necessary commands for incremental backups (append to file, note >>)
+            local restic_password_b64
+            restic_password_b64=$(printf '%s' "$restic_password" | base64 -w 0)
+            # Stable private dump path lets restore select the database explicitly
+            # without putting SQL in the document root or restoring filesystem '/'.
             cat <<EOF >>"$script_path"
 # Get the wp installation folder owner and their home directory
-wp_owner=\$(sudo stat -c "%U" \${domain_path})
+wp_owner=\$(sudo stat -c "%U" "\${domain_path}")
 
 # Get the database name and construct the db backup file name and path
 # Note that we are using sudo to run wp cli commands as "wp_owner" to avoid permissions complications
 db_name=\$(run_wp_cli_as "\${wp_owner}" config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
-db_filename=\${hash}_\${domain//./_}_\${db_name}_incremental.sql
-# We'll export the database and move it to our current directory as a 'tmp' file
-if ! run_wp_cli_as "\${wp_owner}" db export "\${domain_path}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
-    echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >>"$LOG_FILE"
-    sudo rm -f "\${domain_path}/\${db_filename}"
+db_snapshot_path="/var/lib/rclone-automated-backups/dumps/${script_hash}/database.sql"
+install -d -m 700 /var/lib/rclone-automated-backups /var/lib/rclone-automated-backups/dumps
+wp_owner_directory="\${db_snapshot_path%/*}"
+test ! -L "\${wp_owner_directory}"
+install -d -m 700 -o root "\${wp_owner_directory}"
+rm -f -- "\${db_snapshot_path}"
+test ! -L "\${db_snapshot_path}"
+if ! run_wp_cli_as "\${wp_owner}" db export - --path="\${domain_path}" --single-transaction --quick --skip-plugins --skip-themes > "\${db_snapshot_path}"; then
+    echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >>"\${LOG_FILE}"
     exit 1
 fi
 
-restic_password=${restic_password}
+restic_password_b64=${restic_password_b64}
+restic_password=\$(printf '%s' "\${restic_password_b64}" | base64 -d)
 
-echo "[\${timestamp}] - Sending the backup to 'rclone' "\${rclone_remote}" remote  using 'restic'" >>"$LOG_FILE"
+echo "[\${timestamp}] - Sending the backup to 'rclone' "\${rclone_remote}" remote  using 'restic'" >>"\${LOG_FILE}"
 
-# Use restic to save a new backup to rclone remote
-if [ \${call_type} == "restore" ]; then
-    # We will backup the whole folder when it's a pre-restore backup ( no excludes )
-    if ! sudo RESTIC_PASSWORD="\${restic_password}" restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" backup "\$domain_path/"; then
-        echo "[\${timestamp}] ERROR: restic backup failed. Aborting backup." >>"$LOG_FILE"
-        sudo rm -f "\${domain_path}/\${db_filename}"
-        exit 1
-    fi
+# Restic must not traverse a mutable website tree as root. Read it as the
+# website owner, then materialize the checked archive inside root-only storage.
+# The mirrored path retains existing restic subtree restore selectors.
+snapshot_root="\${tmp_path}/incremental-tree"
+printf '%s' "\${BACKUP_EXTRACTOR_B64}" | base64 -d > "\${tmp_path}/extractor.py"
+if [ "\${call_type}" = restore ]; then
+    create_incremental_tree "\${domain_path}" "\${tmp_path}" "\${tmp_path}/extractor.py"
 else
-    if ! sudo RESTIC_PASSWORD="\${restic_password}" restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" backup "\$domain_path/" ${excludes}; then
-        echo "[\${timestamp}] ERROR: restic backup failed. Aborting backup." >>"$LOG_FILE"
-        sudo rm -f "\${domain_path}/\${db_filename}"
-        exit 1
-    fi
+    create_incremental_tree "\${domain_path}" "\${tmp_path}" "\${tmp_path}/extractor.py" ${excludes}
+fi
+if ! (cd "\${snapshot_root}" && RESTIC_PASSWORD="\${restic_password}" sudo --preserve-env=RESTIC_PASSWORD restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" backup "\${domain_path#/}/" "\${db_snapshot_path}"); then
+    echo "[\${timestamp}] ERROR: restic backup failed. Aborting backup." >>"\${LOG_FILE}"
+    exit 1
 fi
 
-echo "[\${timestamp}] - backup sent to the remote location successfully" >>"$LOG_FILE"
-echo "[\${timestamp}] - Delete the internally generated backup files to free space" >>"$LOG_FILE"
+echo "[\${timestamp}] - backup sent to the remote location successfully" >>"\${LOG_FILE}"
+echo "[\${timestamp}] - Delete the internally generated backup files to free space" >>"\${LOG_FILE}"
 
 # Delete the generated database file
-sudo rm "\${domain_path}/\${db_filename}"
+sudo rm "\${db_snapshot_path}"
 
-echo "[\${timestamp}] - Delete backups older than \${retention_period} days from 'rclone' "\${rclone_remote}" remote using 'restic'" >>"$LOG_FILE"
+echo "[\${timestamp}] - Delete backups older than \${retention_period} days from 'rclone' "\${rclone_remote}" remote using 'restic'" >>"\${LOG_FILE}"
 
 # Delete old backups from remote ( retention logic )
-sudo RESTIC_PASSWORD="\${restic_password}" restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" forget --keep-within "\${retention_period}d" --prune
+RESTIC_PASSWORD="\${restic_password}" sudo --preserve-env=RESTIC_PASSWORD restic -q -r "rclone:\${rclone_remote}:\${remote_backup_location}" forget --keep-within "\${retention_period}d" --prune
 
 EOF
 
@@ -1038,74 +1078,69 @@ EOF
             cat <<EOF >>"$script_path"
 
 # Get the wp installation folder owner
-wp_owner=\$(sudo stat -c "%U" \${domain_path})
+wp_owner=\$(sudo stat -c "%U" "\${domain_path}")
 
-# Use a dedicated temp directory for database backups
-wp_owner_directory="/tmp/wp_db_backup_\${hash}"
+# Use a fresh private directory, outside the document root, for database backups.
+wp_owner_directory=\$(mktemp -d /var/tmp/rclone-automated-backups-db.XXXXXXXXXX)
+chmod 700 "\${wp_owner_directory}"
 
-echo "[\${timestamp}] - WP folder owner found: '\${wp_owner}'" >> "$LOG_FILE"
-echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "$LOG_FILE"
+echo "[\${timestamp}] - WP folder owner found: '\${wp_owner}'" >> "\${LOG_FILE}"
+echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "\${LOG_FILE}"
 
-# Create tmp directory with proper permissions if it doesn't exist
-if [ ! -d "\${wp_owner_directory}" ]; then
-    sudo mkdir -p "\${wp_owner_directory}"
-    sudo chown \${wp_owner} "\${wp_owner_directory}"
-    sudo chmod 755 "\${wp_owner_directory}"
-fi
 
 # Export the database using either wp-cli ( reads wp-config.php ) or mysqldump
 # ( uses the credentials baked at the top of this script ). mysqldump passes
 # credentials via --defaults-extra-file so they never appear in argv.
 if [ "\${db_driver}" = "mysqldump" ]; then
-    db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
+    db_filename=\${hash}_database_\${backup_date}.sql
     my_cnf="\${wp_owner_directory}/.bk-\${hash}.cnf"
     umask 077
-    printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "\${db_user}" "\${db_pass}" "\${db_host}" > "\${my_cnf}"
-    if ! sudo mysqldump --defaults-extra-file="\${my_cnf}" --single-transaction --quick --routines --events --triggers "\${db_name}" > "\${wp_owner_directory}/\${db_filename}"; then
-        echo "[\${timestamp}] ERROR: mysqldump export failed. Aborting backup." >> "$LOG_FILE"
+    mysql_client_options "\${db_user}" "\${db_pass}" "\${db_host}" > "\${my_cnf}"
+    if ! sudo mysqldump --defaults-extra-file="\${my_cnf}" --single-transaction --quick --routines --events --triggers -- "\${db_name}" > "\${wp_owner_directory}/\${db_filename}"; then
+        echo "[\${timestamp}] ERROR: mysqldump export failed. Aborting backup." >> "\${LOG_FILE}"
         sudo rm -f "\${my_cnf}" "\${wp_owner_directory}/\${db_filename}"
         exit 1
     fi
     sudo rm -f "\${my_cnf}"
 else
     db_name=\$(run_wp_cli_as "\${wp_owner}" config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
-    db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
-    if ! run_wp_cli_as "\${wp_owner}" db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
-        echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
+    db_filename=\${hash}_database_\${backup_date}.sql
+    if ! run_wp_cli_as "\${wp_owner}" db export - --path="\${domain_path}" --skip-plugins --skip-themes > "\${wp_owner_directory}/\${db_filename}"; then
+        echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "\${LOG_FILE}"
         sudo rm -f "\${wp_owner_directory}/\${db_filename}"
         exit 1
     fi
 fi
 
-echo "[\${timestamp}] - Compressing the database export" >> "$LOG_FILE"
+echo "[\${timestamp}] - Compressing the database export" >> "\${LOG_FILE}"
 
 # Compress the SQL dump to reduce transfer size and remote storage usage
 if ! sudo gzip -f "\${wp_owner_directory}/\${db_filename}"; then
-    echo "[\${timestamp}] ERROR: database compression failed. Aborting backup." >> "$LOG_FILE"
+    echo "[\${timestamp}] ERROR: database compression failed. Aborting backup." >> "\${LOG_FILE}"
     sudo rm -f "\${wp_owner_directory}/\${db_filename}" "\${wp_owner_directory}/\${db_filename}.gz"
     exit 1
 fi
 db_archive="\${wp_owner_directory}/\${db_filename}.gz"
 
-echo "[\${timestamp}] - Sending the database backup to remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+echo "[\${timestamp}] - Sending the database backup to remote location "\${rclone_remote}" using rclone" >> "\${LOG_FILE}"
 
 # Copy the compressed database backup to the remote location using rclone
-if ! sudo rclone copy "\${db_archive}" \${rclone_remote}:\${remote_backup_location}; then
-    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "$LOG_FILE"
+if ! sudo rclone copy "\${db_archive}" "\${rclone_remote}:\${remote_backup_location}"; then
+    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "\${LOG_FILE}"
     sudo rm -f "\${db_archive}"
     exit 1
 fi
 
-echo "[\${timestamp}] - database backup sent to the remote location successfully" >> "$LOG_FILE"
-echo "[\${timestamp}] - Delete the internally generated database backup to free space" >> "$LOG_FILE"
+echo "[\${timestamp}] - database backup sent to the remote location successfully" >> "\${LOG_FILE}"
+echo "[\${timestamp}] - Delete the internally generated database backup to free space" >> "\${LOG_FILE}"
 
 # Delete the locally generated database archive
 sudo rm -f "\${db_archive}"
 
-echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "\${LOG_FILE}"
 
 # Delete old backups from remote ( retention logic )
-sudo rclone delete --min-age \${retention_period}d "\${rclone_remote}":"\${remote_backup_location}"
+sudo rclone delete --min-age "\${retention_period}d" --include "\${hash}_*" "\${rclone_remote}:\${remote_backup_location}"
 
 EOF
 
@@ -1116,39 +1151,39 @@ EOF
             cat <<EOF >>"$script_path"
 
 if [ \${call_type} == "restore" ]; then
-    echo "[\${timestamp}] - Generating pre-restore backup archive" >> "$LOG_FILE"
-    backup_filename=\${tmp_path}/\${hash}_\${domain//./-}_\${backup_date}-pre-restore.tar.gz
+    echo "[\${timestamp}] - Generating pre-restore backup archive" >> "\${LOG_FILE}"
+    backup_filename=\${tmp_path}/\${hash}_site_\${backup_date}-pre-restore.tar.gz
 else
-    echo "[\${timestamp}] - Generating backup archive" >> "$LOG_FILE"
-    backup_filename=\${tmp_path}/\${hash}_\${domain//./-}_\${backup_date}.tar.gz
+    echo "[\${timestamp}] - Generating backup archive" >> "\${LOG_FILE}"
+    backup_filename=\${tmp_path}/\${hash}_site_\${backup_date}.tar.gz
 fi
 
 # --- Backup Logic ---
 
-echo "[\${timestamp}] - Attempting direct tar backup" >> "$LOG_FILE"
+echo "[\${timestamp}] - Attempting direct tar backup" >> "\${LOG_FILE}"
 
 backup_success=false
 
 if sudo test "\${call_type}" = "restore"; then
     # Pre-restore: tar without excludes so the restore-baseline is complete
-    if sudo tar --warning=no-file-changed --transform 's,^\./,,' -czf "\${backup_filename}.tmp" -C "\${domain_path}/" . 2>> "$LOG_FILE"; then
+    if create_site_archive "\${backup_filename}.tmp" "\${domain_path}" '' 2>> "\${LOG_FILE}"; then
         backup_success=true
-        echo "[\${timestamp}] - Direct tar backup successful" >> "$LOG_FILE"
+        echo "[\${timestamp}] - Direct tar backup successful" >> "\${LOG_FILE}"
     else
-        echo "[\${timestamp}] - Direct tar backup failed" >> "$LOG_FILE"
+        echo "[\${timestamp}] - Direct tar backup failed" >> "\${LOG_FILE}"
     fi
 else
     # Scheduled run: apply excludes
-    if sudo tar --warning=no-file-changed --transform 's,^\./,,' $excludes -czf "\${backup_filename}.tmp" -C "\${domain_path}/" . 2>> "$LOG_FILE"; then
+    if create_site_archive "\${backup_filename}.tmp" "\${domain_path}" '' $excludes 2>> "\${LOG_FILE}"; then
         backup_success=true
-        echo "[\${timestamp}] - Direct tar backup successful" >> "$LOG_FILE"
+        echo "[\${timestamp}] - Direct tar backup successful" >> "\${LOG_FILE}"
     else
-        echo "[\${timestamp}] - Direct tar backup failed" >> "$LOG_FILE"
+        echo "[\${timestamp}] - Direct tar backup failed" >> "\${LOG_FILE}"
     fi
 fi
 
 if [ "\$backup_success" = false ]; then
-    echo "[\${timestamp}] ERROR: tar backup failed" >> "$LOG_FILE"
+    echo "[\${timestamp}] ERROR: tar backup failed" >> "\${LOG_FILE}"
     sudo rm -f "\${backup_filename}.tmp"
     exit 1
 fi
@@ -1158,26 +1193,26 @@ sudo mv "\${backup_filename}.tmp" "\${backup_filename}"
 
 # --- End Backup Logic ---
 
-echo "[\${timestamp}] - backup archive generated: "\${backup_filename}"" >> "$LOG_FILE"
-echo "[\${timestamp}] - Sending the backup file to remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+echo "[\${timestamp}] - backup archive generated: "\${backup_filename}"" >> "\${LOG_FILE}"
+echo "[\${timestamp}] - Sending the backup file to remote location "\${rclone_remote}" using rclone" >> "\${LOG_FILE}"
 
 # Copy the generated backup to the remote location using rclone
-if ! sudo rclone copy \$backup_filename \${rclone_remote}:\${remote_backup_location}; then
-    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "$LOG_FILE"
+if ! sudo rclone copy "\${backup_filename}" "\${rclone_remote}:\${remote_backup_location}"; then
+    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "\${LOG_FILE}"
     sudo rm -f "\${backup_filename}"
     exit 1
 fi
 
-echo "[\${timestamp}] - backup file sent to the remote location successfully" >> "$LOG_FILE"
-echo "[\${timestamp}] - Delete the internally generated backup files to free space" >> "$LOG_FILE"
+echo "[\${timestamp}] - backup file sent to the remote location successfully" >> "\${LOG_FILE}"
+echo "[\${timestamp}] - Delete the internally generated backup files to free space" >> "\${LOG_FILE}"
 
 # Delete the generated backup archive
-sudo rm \${backup_filename}
+sudo rm -- "\${backup_filename}"
 
-echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "\${LOG_FILE}"
 
 # Delete old backups from remote ( retention logic )
-sudo rclone delete --min-age \${retention_period}d "\${rclone_remote}":"\${remote_backup_location}"
+sudo rclone delete --min-age "\${retention_period}d" --include "\${hash}_*" "\${rclone_remote}:\${remote_backup_location}"
 
 EOF
 
@@ -1186,20 +1221,15 @@ EOF
             cat <<EOF >>"$script_path"
 
 # Get the wp installation folder owner
-wp_owner=\$(sudo stat -c "%U" \${domain_path})
+wp_owner=\$(sudo stat -c "%U" "\${domain_path}")
 
-# Use a dedicated temp directory for database backups
-wp_owner_directory="/tmp/wp_db_backup_\${hash}"
+# Use a fresh private directory, outside the document root, for database backups.
+wp_owner_directory=\$(mktemp -d /var/tmp/rclone-automated-backups-db.XXXXXXXXXX)
+chmod 700 "\${wp_owner_directory}"
 
-echo "[\${timestamp}] - WP folder owner found: '\${wp_owner}'" >> "$LOG_FILE"
-echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "$LOG_FILE"
+echo "[\${timestamp}] - WP folder owner found: '\${wp_owner}'" >> "\${LOG_FILE}"
+echo "[\${timestamp}] - Using temp directory: '\${wp_owner_directory}'" >> "\${LOG_FILE}"
 
-# Create tmp directory with proper permissions if it doesn't exist
-if [ ! -d "\${wp_owner_directory}" ]; then
-    sudo mkdir -p "\${wp_owner_directory}"
-    sudo chown \${wp_owner} "\${wp_owner_directory}"
-    sudo chmod 755 "\${wp_owner_directory}"
-fi
 
 # Get wp-config.php location (one level up from domain_path for WordOps)
 wp_config_path="\${domain_path}"
@@ -1210,103 +1240,42 @@ fi
 # Export the database using either wp-cli ( reads wp-config.php ) or mysqldump
 # ( uses the credentials baked at the top of this script ).
 if [ "\${db_driver}" = "mysqldump" ]; then
-    db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
+    db_filename=\${hash}_database_\${backup_date}.sql
     my_cnf="\${wp_owner_directory}/.bk-\${hash}.cnf"
     umask 077
-    printf '[client]\nuser=%s\npassword=%s\nhost=%s\n' "\${db_user}" "\${db_pass}" "\${db_host}" > "\${my_cnf}"
-    if ! sudo mysqldump --defaults-extra-file="\${my_cnf}" --single-transaction --quick --routines --events --triggers "\${db_name}" > "\${wp_owner_directory}/\${db_filename}"; then
-        echo "[\${timestamp}] ERROR: mysqldump export failed. Aborting backup." >> "$LOG_FILE"
+    mysql_client_options "\${db_user}" "\${db_pass}" "\${db_host}" > "\${my_cnf}"
+    if ! sudo mysqldump --defaults-extra-file="\${my_cnf}" --single-transaction --quick --routines --events --triggers -- "\${db_name}" > "\${wp_owner_directory}/\${db_filename}"; then
+        echo "[\${timestamp}] ERROR: mysqldump export failed. Aborting backup." >> "\${LOG_FILE}"
         sudo rm -f "\${my_cnf}" "\${wp_owner_directory}/\${db_filename}"
         exit 1
     fi
     sudo rm -f "\${my_cnf}"
 else
     db_name=\$(run_wp_cli_as "\${wp_owner}" config get DB_NAME --path="\${domain_path}" --skip-plugins --skip-themes)
-    db_filename=\${hash}_\${domain//./_}_\${db_name}_\${backup_date}.sql
-    if ! run_wp_cli_as "\${wp_owner}" db export "\${wp_owner_directory}/\${db_filename}" --path="\${domain_path}" --skip-plugins --skip-themes; then
-        echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "$LOG_FILE"
+    db_filename=\${hash}_database_\${backup_date}.sql
+    if ! run_wp_cli_as "\${wp_owner}" db export - --path="\${domain_path}" --skip-plugins --skip-themes > "\${wp_owner_directory}/\${db_filename}"; then
+        echo "[\${timestamp}] ERROR: database export failed. Aborting backup." >> "\${LOG_FILE}"
         sudo rm -f "\${wp_owner_directory}/\${db_filename}"
         exit 1
     fi
 fi
 
 if [ \${call_type} == "restore" ]; then
-    echo "[\${timestamp}] - Generating pre-restore backup archive" >> "$LOG_FILE"
-    backup_filename=\${tmp_path}/\${hash}_\${domain//./-}_\${backup_date}-pre-restore.tar.gz
+    echo "[\${timestamp}] - Generating pre-restore backup archive" >> "\${LOG_FILE}"
+    backup_filename=\${tmp_path}/\${hash}_site_\${backup_date}-pre-restore.tar.gz
 else
-    echo "[\${timestamp}] - Generating backup archive" >> "$LOG_FILE"
-    backup_filename=\${tmp_path}/\${hash}_\${domain//./-}_\${backup_date}.tar.gz
+    echo "[\${timestamp}] - Generating backup archive" >> "\${LOG_FILE}"
+    backup_filename=\${tmp_path}/\${hash}_site_\${backup_date}.tar.gz
 fi
 
 # --- Backup Logic ---
 
-# Prepare the backup file (compress the target site and the previously exported database)
-echo "[\${timestamp}] - Attempting direct tar backup" >> "$LOG_FILE"
-
-backup_success=false
-
-if sudo test "\${call_type}" = "restore"; then
-    # Try direct tar for pre-restore backup first
-    if sudo tar --warning=no-file-changed --transform 's,^\./,,' -czf "\${backup_filename}.tmp" -C "\${domain_path}/" . -C "\${wp_owner_directory}/" "\${db_filename}" 2>> "$LOG_FILE"; then
-        backup_success=true
-        echo "[\${timestamp}] - Direct tar backup successful" >> "$LOG_FILE"
-    else
-        echo "[\${timestamp}] - Direct tar backup failed, trying alternative method" >> "$LOG_FILE"
-    fi
-else
-    # Try direct tar with excludes first
-    if sudo tar --warning=no-file-changed --transform 's,^\./,,' $excludes -czf "\${backup_filename}.tmp" -C "\${domain_path}/" . -C "\${wp_owner_directory}/" "\${db_filename}" 2>> "$LOG_FILE"; then
-        backup_success=true
-        echo "[\${timestamp}] - Direct tar backup successful" >> "$LOG_FILE"
-    else
-        echo "[\${timestamp}] - Direct tar backup failed, trying alternative method" >> "$LOG_FILE"
-    fi
-fi
-
-# If direct tar failed, try cp method
-if [ "\$backup_success" = false ]; then
-    # Create temporary directory for cp method
-    tmp_backup_dir="\${wp_owner_directory}/tmp_backup_\${backup_date}"
-    
-    # Check available space before copying
-    required_space=\$(sudo du -sb "\${domain_path}" | cut -f1)
-    available_space=\$(sudo df -B1 "\${wp_owner_directory}" | awk 'NR==2 {print \$4}')
-
-    if [ "\$available_space" -gt "\$((required_space * 2))" ]; then
-        echo "[\${timestamp}] - Sufficient space available for cp method" >> "$LOG_FILE"
-        
-        # Create temp directory and copy files
-        sudo mkdir -p "\${tmp_backup_dir}"
-        
-        if sudo test "\${call_type}" = "restore"; then
-            sudo cp -a "\${domain_path}/." "\${tmp_backup_dir}/"
-        else
-            sudo cp -a "\${domain_path}/." "\${tmp_backup_dir}/"
-            # Apply excludes by removing excluded files/directories
-            for exclude in $excludes; do
-                exclude_path=\$(echo "\$exclude" | sed 's/--exclude=//')
-                sudo rm -rf "\${tmp_backup_dir}/\${exclude_path}"
-            done
-        fi
-        
-        # Try tar on the copied files
-        if sudo tar -czf "\${backup_filename}.tmp" -C "\${tmp_backup_dir}" . -C "\${wp_owner_directory}/" "\${db_filename}" 2>> "$LOG_FILE"; then
-            backup_success=true
-            echo "[\${timestamp}] - Backup successful using cp method" >> "$LOG_FILE"
-        fi
-        
-        # Clean up temp directory
-        sudo rm -rf "\${tmp_backup_dir}"
-    else
-        echo "[\${timestamp}] - Insufficient space for cp method" >> "$LOG_FILE"
-    fi
-fi
-
-if [ "\$backup_success" = false ]; then
-    echo "[\${timestamp}] ERROR: All backup methods failed" >> "$LOG_FILE"
-    # Cleanup any temporary files
-    sudo rm -f "\${backup_filename}.tmp"
-    sudo rm -f "\${wp_owner_directory}/\${db_filename}"
+# Source files are read as the site owner; append only the root-private SQL.
+# The helper retains the changing-files snapshot fallback and its space check.
+archive_excludes=($excludes)
+[ "\${call_type}" != "restore" ] || archive_excludes=()
+if ! create_site_archive "\${backup_filename}.tmp" "\${domain_path}" "\${wp_owner_directory}/\${db_filename}" "\${archive_excludes[@]}"; then
+    echo "[\${timestamp}] ERROR: Site archive failed" >> "\${LOG_FILE}"
     exit 1
 fi
 
@@ -1315,34 +1284,34 @@ sudo mv "\${backup_filename}.tmp" "\${backup_filename}"
 
 # --- End Backup Logic ---
 
-echo "[\${timestamp}] - backup archive generated: "\${backup_filename}"" >> "$LOG_FILE"
-echo "[\${timestamp}] - Sending the backup file to remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+echo "[\${timestamp}] - backup archive generated: "\${backup_filename}"" >> "\${LOG_FILE}"
+echo "[\${timestamp}] - Sending the backup file to remote location "\${rclone_remote}" using rclone" >> "\${LOG_FILE}"
 
 # Copy the generated backup to the remote location using rclone
-if ! sudo rclone copy \$backup_filename \${rclone_remote}:\${remote_backup_location}; then
-    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "$LOG_FILE"
+if ! sudo rclone copy "\${backup_filename}" "\${rclone_remote}:\${remote_backup_location}"; then
+    echo "[\${timestamp}] ERROR: rclone copy failed. Aborting backup." >> "\${LOG_FILE}"
     sudo rm -f "\${backup_filename}" "\${wp_owner_directory}/\${db_filename}"
     exit 1
 fi
 
-echo "[\${timestamp}] - backup file sent to the remote location successfully" >> "$LOG_FILE"
-echo "[\${timestamp}] - Delete the internally generated backup files to free space" >> "$LOG_FILE"
+echo "[\${timestamp}] - backup file sent to the remote location successfully" >> "\${LOG_FILE}"
+echo "[\${timestamp}] - Delete the internally generated backup files to free space" >> "\${LOG_FILE}"
 
 # Delete the generated backup archive and database
-sudo rm \${backup_filename}
-sudo rm \${wp_owner_directory}/\${db_filename}
+sudo rm -- "\${backup_filename}"
+sudo rm -- "\${wp_owner_directory}/\${db_filename}"
 
-echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "$LOG_FILE"
+echo "[\${timestamp}] - Delete backups older than \${retention_period} days from remote location "\${rclone_remote}" using rclone" >> "\${LOG_FILE}"
 
 # Delete old backups from remote ( retention logic )
-sudo rclone delete --min-age \${retention_period}d "\${rclone_remote}":"\${remote_backup_location}"
+sudo rclone delete --min-age "\${retention_period}d" --include "\${hash}_*" "\${rclone_remote}:\${remote_backup_location}"
 
 EOF
         fi
 
         # Add the final content of the script file (append to file, note >>)
         cat <<EOF >>"$script_path"
-echo "[\${timestamp}] BACK UP FINISHED (\${type}): $backup_frequency backup for \${domain} has completed successfully" >> "$LOG_FILE"
+echo "[\${timestamp}] BACK UP FINISHED (\${type}): $backup_frequency backup for \${domain} has completed successfully" >> "\${LOG_FILE}"
 
 # Make sure to close the log file when done
 exec 3>&-
@@ -1363,9 +1332,14 @@ EOF
         # The grep-then-append is guarded by an exclusive flock so concurrent
         # headless runs ( eg; a bulk rollout that scripts 30 sites in parallel )
         # cannot race and produce duplicate cron lines.
-        local cron_line="$cron_expression root /bin/bash $PWD/$script_path"
+        local cron_script cron_line
+        printf -v cron_script '%q' "$PWD/$script_path"
+        # Cron interprets percent signs before passing its command to a shell.
+        cron_script="${cron_script//%/\\%}"
+        cron_line="$cron_expression root /bin/bash $cron_script"
         (
-            exec 8>"/tmp/rclone-automated-backups-cron-write.lock"
+            prepare_backup_lock /tmp/rclone-automated-backups-cron-write.lock || return 1
+            exec 8<>"/tmp/rclone-automated-backups-cron-write.lock"
             flock 8
             if grep -Fqx "$cron_line" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null \
                 || grep -Fq "$(basename "$script_path")" "$CRON_FILE" "$COMPAT_CRON_FILE" 2>/dev/null; then
@@ -1406,6 +1380,7 @@ EOF
                 echo -e "${GREEN}First backup completed. Backups will continue on the schedule.${RESET}"
             else
                 echo -e "${RED}First backup FAILED - check the log: $LOG_FILE${RESET}" >&2
+                return 1
             fi
         else
             echo -e "${YELLOW}Skipped the first backup; the schedule will take it ( $backup_time, $schedule_label ).${RESET}"

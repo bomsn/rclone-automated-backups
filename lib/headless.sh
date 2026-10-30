@@ -34,6 +34,7 @@ Conditional / optional:
   --db-user    <user>     required when --db-driver mysqldump
   --db-pass    <pass>     required when --db-driver mysqldump
   --db-host    <host>     mysqldump host ( default: localhost )
+  --php-binary <path>     explicit site PHP CLI for scheduled WordPress backups
   --no-initial            don't run the first backup now; let the schedule
                           take it ( default: run the first backup immediately )
   --yes                   assume yes to confirmations
@@ -48,6 +49,7 @@ run_headless() {
     BACKUP_TIME="" RETENTION_PERIOD="" BACKUP_REMOTE="" REMOTE_BACKUP_LOCATION=""
     BACKUP_PASS="" EXCLUDED_ITEMS="" ASSUME_YES=false SKIP_INITIAL=false
     DB_DRIVER="wpcli" DB_NAME="" DB_USER="" DB_PASS="" DB_HOST="localhost"
+    BACKUP_PHP_BINARY=""
     local hl_path="" hl_day="" hl_exclude_set=false hl_db_driver_set=false
     local flag val
 
@@ -69,7 +71,7 @@ run_headless() {
             shift
             continue
             ;;
-        --domain | --path | --type | --frequency | --day | --time | --retention | --remote | --location | --exclude | --password | --db-driver | --db-name | --db-user | --db-pass | --db-host)
+        --domain | --path | --type | --frequency | --day | --time | --retention | --remote | --location | --exclude | --password | --db-driver | --db-name | --db-user | --db-pass | --db-host | --php-binary)
             if [ $# -lt 2 ]; then
                 headless_usage "option $flag requires a value"
                 return 2
@@ -105,6 +107,7 @@ run_headless() {
         --db-user) DB_USER="$val" ;;
         --db-pass) DB_PASS="$val" ;;
         --db-host) DB_HOST="$val" ;;
+        --php-binary) BACKUP_PHP_BINARY="$val" ;;
         esac
     done
 
