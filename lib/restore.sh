@@ -465,6 +465,62 @@ restore_incremental_database_file() {
     fi
 }
 
+# A setting from the restored site's wp-config.php, read without loading WordPress.
+restore_config_value() {
+    run_wp_cli config get "$1" --path="$RESTORE_TARGET_PATH" --allow-root 2>/dev/null || true
+}
+
+# True when the restored site's object cache belongs to it alone, so flushing it
+# cannot empty another site's cache: a key prefix with selective flush, or a Redis
+# Unix socket in a directory that only the site's owner or group can enter.
+# CloudPanel's default local Redis ( 127.0.0.1:6379 ) is shared by every site.
+restore_object_cache_is_private() {
+    local prefix selective socket directory mode site_uid site_gid
+    prefix=$(restore_config_value WP_REDIS_PREFIX)
+    [ -n "$prefix" ] || prefix=$(restore_config_value WP_CACHE_KEY_SALT)
+    selective=$(restore_config_value WP_REDIS_SELECTIVE_FLUSH)
+    if [ -n "$prefix" ] && [[ "${selective,,}" =~ ^(1|true)$ ]]; then
+        return 0
+    fi
+    [ "$(restore_config_value WP_REDIS_SCHEME)" = unix ] || return 1
+    socket=$(restore_config_value WP_REDIS_PATH)
+    [[ "$socket" == /* ]] || return 1
+    directory=$(dirname -- "$socket")
+    [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+    mode=$(stat -c %a -- "$directory") || return 1
+    (( (8#$mode & 0007) == 0 )) || return 1
+    # The same site owner run_wp_cli runs as.
+    site_uid=$(stat -c %u -- "$RESTORE_TARGET_PATH") || return 1
+    if [ "$site_uid" -eq 0 ] && [ -f "$RESTORE_TARGET_PATH/wp-config.php" ]; then
+        site_uid=$(stat -c %u -- "$RESTORE_TARGET_PATH/wp-config.php") || return 1
+    fi
+    site_gid=$(getent passwd "$site_uid" | cut -d: -f4)
+    [ "$(stat -c %u -- "$directory")" = "$site_uid" ] || { [ -n "$site_gid" ] && [ "$(stat -c %g -- "$directory")" = "$site_gid" ]; }
+}
+
+# Decide, before WordPress first reads the imported data, how the restored site's
+# object-cache drop-in is handled. A private cache is flushed around the rewrite.
+# Any other cache is never flushed ( it may be shared with other sites ): the
+# drop-in is set aside, so WP-CLI reads and writes the database directly and the
+# copy does not use keys another site may have written.
+restore_prepare_object_cache() {
+    local dropin="$RESTORE_TARGET_PATH/wp-content/object-cache.php"
+    RESTORE_OBJECT_CACHE=none
+    [ -e "$dropin" ] || [ -L "$dropin" ] || return 0
+    if restore_object_cache_is_private; then
+        RESTORE_OBJECT_CACHE=private
+        return 0
+    fi
+    mv -f -- "$dropin" "$dropin.disabled-by-restore" || return 1
+    RESTORE_OBJECT_CACHE=disabled
+    echo -e "${YELLOW}The restored object-cache drop-in was set aside as wp-content/object-cache.php.disabled-by-restore, because this destination's cache settings don't give it a cache of its own ( a shared Redis would serve other sites' data, and flushing it would empty theirs ). Give the copy its own cache ( WP_REDIS_PREFIX with WP_REDIS_SELECTIVE_FLUSH, or a private socket ), then rename the file back.${RESET}"
+}
+
+restore_flush_object_cache() {
+    [ "$RESTORE_OBJECT_CACHE" = private ] || return 0
+    run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
+}
+
 # After the import, rewrite the WordPress URL from the source's ( which the
 # import just wrote into the DB ) to the target URL captured earlier, so the
 # restored copy stops referencing the live domain. Only runs for a WordPress
@@ -484,10 +540,11 @@ maybe_wp_search_replace() {
     # The freshly imported DB now holds the source's URL — that is the value to
     # search for. A restored object-cache drop-in can still answer with the
     # destination's earlier URL, which once made a restore skip the rewrite and leave
-    # the copy configured as the live site, so flush before reading. Tolerate a
-    # non-zero / empty read under set -e, and only trust a real URL ( never a
-    # wp-cli error blob ).
-    run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
+    # the copy configured as the live site, so it is flushed ( a private cache ) or
+    # set aside ( any other ) before reading. Tolerate a non-zero / empty read under
+    # set -e, and only trust a real URL ( never a wp-cli error blob ).
+    restore_prepare_object_cache || { echo -e "${RED}Could not set aside the restored object-cache drop-in.${RESET}"; return 1; }
+    restore_flush_object_cache
     RESTORE_URL_OLD=$(run_wp_cli option get siteurl --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes 2>/dev/null) || true
     looks_like_http_url "$RESTORE_URL_OLD" || RESTORE_URL_OLD=""
 
@@ -517,7 +574,7 @@ maybe_wp_search_replace() {
     # search-replace writes SQL directly. A restored object-cache drop-in can still
     # hold the old values, and WordPress then treats the update below as a change
     # the database rejects ( "Could not update option 'siteurl'" ). Flush first.
-    run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
+    restore_flush_object_cache
     # siteurl/home live in the options table; set them explicitly as a belt-and-
     # suspenders in case search-replace skipped a serialized edge case.
     local url_option url_current
@@ -527,9 +584,6 @@ maybe_wp_search_replace() {
             run_wp_cli option update "$url_option" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || return 1
         fi
     done
-    if [ -e "$RESTORE_TARGET_PATH/wp-content/object-cache.php" ]; then
-        echo -e "${YELLOW}The restored files include an object-cache drop-in ( wp-content/object-cache.php ). It now uses this destination's own cache settings; review it before using the copy.${RESET}"
-    fi
 
     # When the files also moved to a different directory, rewrite any absolute
     # filesystem paths the database carries ( some plugins / caches store ABSPATH
@@ -539,5 +593,5 @@ maybe_wp_search_replace() {
         run_wp_cli search-replace "$RESTORE_SOURCE_PATH" "$RESTORE_TARGET_PATH" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes || return 1
     fi
 
-    run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
+    restore_flush_object_cache
 }

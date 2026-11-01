@@ -270,8 +270,9 @@ manage_automated_backups() {
                 # Confirm with the user before deleting the backup
                 read -p "$(echo -e "${BOLD}${RED}Choose an action (c: Confirm deletion, b: Bail out): ${RESET}")" confirm
                 if [ "${confirm,,}" == "c" ]; then
-                    # Remove the backup script file
+                    # Remove the backup script file and its success record for monitoring
                     sudo rm -f "$selected_backup_script"
+                    sudo rm -f -- "${STATUS_DIR:-$(dirname -- "$(operator_path "$LOG_FILE")")/status}/$(basename "$selected_backup_script").json"
 
                     # Construct the cron pattern and remove the associated cron line from
                     # whichever cron file holds it ( current or legacy ).

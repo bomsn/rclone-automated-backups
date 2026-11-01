@@ -27,12 +27,17 @@ Conditional / optional:
                           ( 1..28 or last ); not allowed with daily
   --exclude    <list>     comma-separated paths, or "none"; omit to
                           auto-detect cache / junk folders
-  --password   <pass>     required for --type incremental
+  --password-file <file>  required for --type incremental: a root-owned file
+                          ( mode 600 ) holding the restic password
+  --password   <pass>     the same password as an argument ( older scripts;
+                          other users can read it while the command runs )
   --db-driver  <drv>      wpcli ( default; reads wp-config.php ) or mysqldump
                           ( for non-WP databases or when wp-cli is unavailable )
   --db-name    <name>     required when --db-driver mysqldump
   --db-user    <user>     required when --db-driver mysqldump
-  --db-pass    <pass>     required when --db-driver mysqldump
+  --db-pass-file <file>   required when --db-driver mysqldump: a root-owned
+                          file ( mode 600 ) holding the database password
+  --db-pass    <pass>     the same password as an argument ( older scripts )
   --db-host    <host>     mysqldump host ( default: localhost )
   --php-binary <path>     explicit site PHP CLI for scheduled WordPress backups
   --no-initial            don't run the first backup now; let the schedule
@@ -51,6 +56,7 @@ run_headless() {
     DB_DRIVER="wpcli" DB_NAME="" DB_USER="" DB_PASS="" DB_HOST="localhost"
     BACKUP_PHP_BINARY=""
     local hl_path="" hl_day="" hl_exclude_set=false hl_db_driver_set=false
+    local hl_password_file="" hl_db_pass_file=""
     local flag val
 
     # --- parse --flag value arguments ---
@@ -71,7 +77,7 @@ run_headless() {
             shift
             continue
             ;;
-        --domain | --path | --type | --frequency | --day | --time | --retention | --remote | --location | --exclude | --password | --db-driver | --db-name | --db-user | --db-pass | --db-host | --php-binary)
+        --domain | --path | --type | --frequency | --day | --time | --retention | --remote | --location | --exclude | --password | --password-file | --db-driver | --db-name | --db-user | --db-pass | --db-pass-file | --db-host | --php-binary)
             if [ $# -lt 2 ]; then
                 headless_usage "option $flag requires a value"
                 return 2
@@ -99,6 +105,8 @@ run_headless() {
             hl_exclude_set=true
             ;;
         --password) BACKUP_PASS="$val" ;;
+        --password-file) hl_password_file="$val" ;;
+        --db-pass-file) hl_db_pass_file="$val" ;;
         --db-driver)
             DB_DRIVER="$val"
             hl_db_driver_set=true
@@ -110,6 +118,16 @@ run_headless() {
         --php-binary) BACKUP_PHP_BINARY="$val" ;;
         esac
     done
+
+    # --- secrets from files ( arguments are visible to every local user in /proc ) ---
+    if [ -n "$hl_password_file" ]; then
+        [ -z "$BACKUP_PASS" ] || { headless_usage "use either --password or --password-file, not both"; return 2; }
+        BACKUP_PASS=$(read_secret_file "$hl_password_file") || { headless_usage "--password-file must be a non-empty file owned by root and readable only by root ( chmod 600 )"; return 2; }
+    fi
+    if [ -n "$hl_db_pass_file" ]; then
+        [ -z "$DB_PASS" ] || { headless_usage "use either --db-pass or --db-pass-file, not both"; return 2; }
+        DB_PASS=$(read_secret_file "$hl_db_pass_file") || { headless_usage "--db-pass-file must be a non-empty file owned by root and readable only by root ( chmod 600 )"; return 2; }
+    fi
 
     # --- required flags ---
     [ -n "$BACKUP_DOMAIN" ] || { headless_usage "--domain is required"; return 2; }
@@ -154,7 +172,7 @@ run_headless() {
             return 2
         fi
         if [ -z "$BACKUP_PASS" ]; then
-            headless_usage "--password is required for --type incremental"
+            headless_usage "--password-file ( or --password ) is required for --type incremental"
             return 2
         fi
     fi
@@ -176,7 +194,7 @@ run_headless() {
     mysqldump)
         [ -n "$DB_NAME" ] || { headless_usage "--db-name is required when --db-driver mysqldump"; return 2; }
         [ -n "$DB_USER" ] || { headless_usage "--db-user is required when --db-driver mysqldump"; return 2; }
-        [ -n "$DB_PASS" ] || { headless_usage "--db-pass is required when --db-driver mysqldump"; return 2; }
+        [ -n "$DB_PASS" ] || { headless_usage "--db-pass-file ( or --db-pass ) is required when --db-driver mysqldump"; return 2; }
         if [[ "$DB_PASS" == *$'\n'* ]]; then
             headless_usage "--db-pass must not contain a newline"
             return 2

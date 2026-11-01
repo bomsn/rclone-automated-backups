@@ -33,6 +33,8 @@ CRON_SCRIPTS_DIR="$STATE_DIR/cron_scripts"
 TMP_DIR="$STATE_DIR/tmp"
 DEFINITIONS_FILE="$STATE_DIR/definitions"
 LOG_FILE="$STATE_DIR/backup.log"
+# One success record per backup job, read by monitoring ( see the readme ).
+STATUS_DIR="$STATE_DIR/status"
 CRON_FILE="/etc/cron.d/rclone-automated-backups"
 # Shared lock file: every generated backup script grabs this lock so that, no
 # matter how many cron entries fire at once, backups run strictly one-at-a-time.

@@ -96,6 +96,8 @@ When the `mysqldump` driver is used, the database credentials are stored base64-
 
 New installs keep the site list, logs and generated backup jobs in `/var/lib/rclone-automated-backups`, outside any website. Always run the tool as root, and never keep it or its jobs inside a website folder. If an older install kept its files somewhere else, point to them with `sudo RCLONE_BACKUP_STATE_DIR=/path/to/old/state bash config.sh`. Existing cron schedules are never moved or rewritten.
 
+After every successful run, a backup job records the time in `status/<job name>.json` in that folder. Monitoring can read it to warn you when a scheduled backup didn't succeed: [CloudPanel Companion](https://github.com/bomsn/cloudpanel-companion) does this automatically.
+
 **After updating this tool, regenerate your existing backups** ( disable and recreate them in the menu ). Each generated cron script contains its own copy of the code, so a `git pull` alone doesn't change backups that already exist.
 
 `mysqldump` is invoked with `--single-transaction --quick --routines --events --triggers`. The `--single-transaction` flag provides a consistent snapshot for InnoDB tables; databases that use MyISAM tables may need `--lock-tables` instead, which can be added by editing the generated script.
@@ -122,11 +124,13 @@ sudo bash config.sh \
 | `--path` | new sites | path; required when the domain is not already saved. Must point at a WordPress install for `full` / `incremental` / `database` with the default `wpcli` driver; can be any directory for `--type files` or for `--db-driver mysqldump` |
 | `--day` | weekly / monthly | weekday ( `monday`..`sunday` ) or month day ( `1`..`28`, or `last` ) |
 | `--exclude` | no | comma-separated paths, or `none`; omit to auto-detect cache / junk folders |
-| `--password` | incremental | restic repository password |
+| `--password-file` | incremental | path to a file holding the restic repository password; it must be owned by root and readable only by root ( `chmod 600` ) |
+| `--password` | no | the restic password as an argument, kept for older scripts. Other users on the server can see command arguments while the command runs, so prefer `--password-file` |
 | `--db-driver` | no | `wpcli` ( default ) or `mysqldump`; not valid with `--type files` / `incremental` |
 | `--db-name` | mysqldump | database name |
 | `--db-user` | mysqldump | database user |
-| `--db-pass` | mysqldump | database password |
+| `--db-pass-file` | mysqldump | path to a file holding the database password, owned by root and readable only by root |
+| `--db-pass` | no | the database password as an argument, kept for older scripts; prefer `--db-pass-file` |
 | `--db-host` | no | mysqldump host ( default: `localhost` ) |
 | `--php-binary` | no | PHP to run wp-cli with, e.g. `/usr/bin/php8.3`; recommended on servers with several PHP versions |
 | `--no-initial` | no | skip the immediate first backup; let the schedule take it ( default: run the first backup right away ) |

@@ -847,6 +847,7 @@ remote_backup_location=\$(printf '%s' "\${remote_backup_location_b64}" | base64 
 db_driver_b64=$(printf '%s' "$db_driver" | base64 -w0)
 db_driver=\$(printf '%s' "\${db_driver_b64}" | base64 -d)
 timestamp=\$(date +'%Y-%m-%d %H:%M:%S')
+started_at=\$(date +%s)
 backup_date=\$(date +'%d-%m-%Y_%H-%M')
 
 # Resolve how to run wp-cli. Standard servers run wp directly; Plesk and cPanel
@@ -1310,7 +1311,32 @@ EOF
         fi
 
         # Add the final content of the script file (append to file, note >>)
+        local status_dir="${STATUS_DIR:-$(dirname -- "$(operator_path "$LOG_FILE")")/status}"
         cat <<EOF >>"$script_path"
+# Success record for monitoring ( for example CloudPanel Companion's missed-backup
+# alert ): one JSON file per job, named after this job script and replaced
+# atomically after every successful run. A failed run leaves the previous record.
+status_dir_b64=$(printf '%s' "$status_dir" | base64 -w0)
+status_dir=\$(printf '%s' "\${status_dir_b64}" | base64 -d)
+status_job_b64=$(printf '%s' "$script_name" | base64 -w0)
+status_job=\$(printf '%s' "\${status_job_b64}" | base64 -d)
+status_json() {
+    local value="\$1"
+    value=\${value//\\\\/\\\\\\\\}
+    value=\${value//\"/\\\\\"}
+    printf '"%s"' "\${value//[[:cntrl:]]/}"
+}
+if { [ -d "\${status_dir}" ] || mkdir -m 700 -- "\${status_dir}"; } && [ ! -L "\${status_dir}" ] && [ -O "\${status_dir}" ] &&
+   status_tmp=\$(mktemp "\${status_dir}/.\${status_job}.XXXXXXXXXX") &&
+   printf '{"job": %s, "domain": %s, "type": %s, "schedule": %s, "cron": %s, "started_at": %s, "finished_at": %s}\n' \
+       "\$(status_json "\${status_job}")" "\$(status_json "\${domain}")" "\$(status_json "\${type}")" \
+       "\$(status_json "\${schedule}")" "\$(status_json "\${cron_expression}")" "\${started_at}" "\$(date +%s)" > "\${status_tmp}" &&
+   mv -f -- "\${status_tmp}" "\${status_dir}/\${status_job}.json"; then
+    :
+else
+    echo "[\${timestamp}] WARNING: the backup succeeded, but its success record for monitoring could not be written to \${status_dir}" >> "\${LOG_FILE}"
+    if [ -n "\${status_tmp:-}" ]; then rm -f -- "\${status_tmp}"; fi
+fi
 echo "[\${timestamp}] BACK UP FINISHED (\${type}): $backup_frequency backup for \${domain} has completed successfully" >> "\${LOG_FILE}"
 
 # Make sure to close the log file when done
@@ -1430,21 +1456,21 @@ print_repeat_hint() {
     hint+=" --exclude \"$hint_exclude\""
     # Emit a placeholder rather than the real restic password, so copying this
     # command into a script or shell history does not leak the secret.
-    [ "$BACKUP_TYPE" == "incremental" ] && hint+=" --password \"<your-restic-password>\""
+    [ "$BACKUP_TYPE" == "incremental" ] && hint+=" --password-file \"<root-only file with your restic password>\""
     # mysqldump-driven backups need their own credentials; same placeholder
     # treatment for the password.
     if [ "${DB_DRIVER:-wpcli}" == "mysqldump" ]; then
         hint+=" --db-driver \"mysqldump\""
         hint+=" --db-name \"$DB_NAME\""
         hint+=" --db-user \"$DB_USER\""
-        hint+=" --db-pass \"<your-db-password>\""
+        hint+=" --db-pass-file \"<root-only file with your database password>\""
         [ -n "$DB_HOST" ] && [ "$DB_HOST" != "localhost" ] && hint+=" --db-host \"$DB_HOST\""
     fi
     hint+=" --yes"
 
     echo -e "${BOLD}To create this backup again ( or script it ), run:${RESET}"
     echo -e "${GREEN}${hint}${RESET}"
-    [ "$BACKUP_TYPE" == "incremental" ] && echo -e "${YELLOW}Replace <your-restic-password> with the password you set for this backup.${RESET}"
-    [ "${DB_DRIVER:-wpcli}" == "mysqldump" ] && echo -e "${YELLOW}Replace <your-db-password> with the database password you supplied.${RESET}"
+    [ "$BACKUP_TYPE" == "incremental" ] && echo -e "${YELLOW}Put the password you set for this backup in a file only root can read ( chmod 600 ) and use its path.${RESET}"
+    [ "${DB_DRIVER:-wpcli}" == "mysqldump" ] && echo -e "${YELLOW}Put the database password in a file only root can read ( chmod 600 ) and use its path.${RESET}"
     echo ""
 }

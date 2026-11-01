@@ -35,6 +35,21 @@ finally:os.close(current)
 PY
 }
 
+# Print the secret held in a file given instead of a command-line argument, which
+# every local user can read in /proc while the command runs. The file must be a
+# non-empty regular file owned by root that nobody else can read; its first line
+# is the secret.
+read_secret_file() {
+    local path="$1" mode value=""
+    [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] || return 1
+    mode=$(stat -c %a -- "$path") || return 1
+    (( (8#$mode & 0077) == 0 )) || return 1
+    IFS= read -r value < "$path" || [ -n "$value" ] || return 1
+    value=${value%$'\r'}
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+}
+
 validate_operator_file() {
     local path="$1" mode
     [ -f "$path" ] && [ ! -L "$path" ] && [ -O "$path" ] || return 1
