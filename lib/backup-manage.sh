@@ -246,7 +246,7 @@ manage_automated_backups() {
                 return
                 ;;
             "Enable")
-                echo "$selected_backup_cron_expression root /bin/bash $PWD/$selected_backup_script" >>"$CRON_FILE"
+                echo "$selected_backup_cron_expression root /bin/bash $(operator_path "$selected_backup_script")" >>"$CRON_FILE"
 
                 restore_cursor_position "alt"
                 clear_screen "force"

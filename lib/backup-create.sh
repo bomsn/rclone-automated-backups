@@ -918,7 +918,7 @@ fi
 
 # Email a failure alert if this backup exits with an error ( one alert per failed run ).
 # The address is read from the definitions file at run time, so it can be changed centrally.
-definitions_file_b64=$(printf '%s' "$PWD/$DEFINITIONS_FILE" | base64 -w0)
+definitions_file_b64=$(operator_path "$DEFINITIONS_FILE" | base64 -w0)
 definitions_file=\$(printf '%s' "\${definitions_file_b64}" | base64 -d)
 backup_failure_notify() {
     local rc=\$1
@@ -1333,7 +1333,7 @@ EOF
         # headless runs ( eg; a bulk rollout that scripts 30 sites in parallel )
         # cannot race and produce duplicate cron lines.
         local cron_script cron_line
-        printf -v cron_script '%q' "$PWD/$script_path"
+        printf -v cron_script '%q' "$(operator_path "$script_path")"
         # Cron interprets percent signs before passing its command to a shell.
         cron_script="${cron_script//%/\\%}"
         cron_line="$cron_expression root /bin/bash $cron_script"

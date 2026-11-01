@@ -482,8 +482,12 @@ maybe_wp_search_replace() {
     fi
 
     # The freshly imported DB now holds the source's URL — that is the value to
-    # search for. Tolerate a non-zero / empty read under set -e, and only trust a
-    # real URL ( never a wp-cli error blob ).
+    # search for. A restored object-cache drop-in can still answer with the
+    # destination's earlier URL, which once made a restore skip the rewrite and leave
+    # the copy configured as the live site, so flush before reading. Tolerate a
+    # non-zero / empty read under set -e, and only trust a real URL ( never a
+    # wp-cli error blob ).
+    run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
     RESTORE_URL_OLD=$(run_wp_cli option get siteurl --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes 2>/dev/null) || true
     looks_like_http_url "$RESTORE_URL_OLD" || RESTORE_URL_OLD=""
 
@@ -504,10 +508,28 @@ maybe_wp_search_replace() {
         echo -e "${RED}URL rewrite failed. The restored copy may still reference ${RESTORE_URL_OLD}; fix it before using the site.${RESET}"
         return 1
     fi
+    # JSON stores the URL with escaped slashes ( https:\/\/example.com ), as Elementor
+    # page data and SEO image metadata do; the plain pass above cannot match those.
+    if ! run_wp_cli search-replace "${RESTORE_URL_OLD//\//\\/}" "${RESTORE_URL_NEW//\//\\/}" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes; then
+        echo -e "${RED}URL rewrite of JSON-escaped references failed. The restored copy may still reference ${RESTORE_URL_OLD}; fix it before using the site.${RESET}"
+        return 1
+    fi
+    # search-replace writes SQL directly. A restored object-cache drop-in can still
+    # hold the old values, and WordPress then treats the update below as a change
+    # the database rejects ( "Could not update option 'siteurl'" ). Flush first.
+    run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
     # siteurl/home live in the options table; set them explicitly as a belt-and-
     # suspenders in case search-replace skipped a serialized edge case.
-    run_wp_cli option update siteurl "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || return 1
-    run_wp_cli option update home "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || return 1
+    local url_option url_current
+    for url_option in siteurl home; do
+        url_current=$(run_wp_cli option get "$url_option" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes 2>/dev/null) || url_current=""
+        if [ "$url_current" != "$RESTORE_URL_NEW" ]; then
+            run_wp_cli option update "$url_option" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || return 1
+        fi
+    done
+    if [ -e "$RESTORE_TARGET_PATH/wp-content/object-cache.php" ]; then
+        echo -e "${YELLOW}The restored files include an object-cache drop-in ( wp-content/object-cache.php ). It now uses this destination's own cache settings; review it before using the copy.${RESET}"
+    fi
 
     # When the files also moved to a different directory, rewrite any absolute
     # filesystem paths the database carries ( some plugins / caches store ABSPATH

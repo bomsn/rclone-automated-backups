@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 
+# Absolute form of an operator path. New installs keep their state under the
+# absolute /var/lib/rclone-automated-backups; older layouts used paths relative to
+# the tool's folder, which resolve against the working directory.
+operator_path() {
+    case "$1" in
+        /*) printf '%s' "$1" ;;
+        *) printf '%s/%s' "$PWD" "$1" ;;
+    esac
+}
+
 # A root cron job must not live below a directory a website user can replace.
 # Walk descriptors rather than validating a pathname and reopening it later.
 prepare_operator_directory() {
