@@ -521,6 +521,20 @@ restore_flush_object_cache() {
     run_wp_cli_without_site_code cache flush --path="$RESTORE_TARGET_PATH" --allow-root >/dev/null 2>&1 || true
 }
 
+# A URL as PHP's rawurlencode() writes it ( unreserved characters kept, everything
+# else as uppercase %XX ), which is how WordPress puts a URL into a query value.
+restore_percent_encode() {
+    local value=$1 encoded='' character i
+    for (( i = 0; i < ${#value}; i++ )); do
+        character=${value:i:1}
+        case "$character" in
+            [A-Za-z0-9.~_-]) encoded+=$character ;;
+            *) encoded+=$(printf '%%%02X' "'$character") ;;
+        esac
+    done
+    printf '%s' "$encoded"
+}
+
 # After the import, rewrite the WordPress URL from the source's ( which the
 # import just wrote into the DB ) to the target URL captured earlier, so the
 # restored copy stops referencing the live domain. Only runs for a WordPress
@@ -574,6 +588,15 @@ maybe_wp_search_replace() {
     # page data and SEO image metadata do; the plain pass above cannot match those.
     if ! run_wp_cli_without_site_code search-replace "${RESTORE_URL_OLD//\//\\/}" "${RESTORE_URL_NEW//\//\\/}" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root; then
         echo -e "${RED}URL rewrite of JSON-escaped references failed. The restored copy may still reference ${RESTORE_URL_OLD}; fix it before using the site.${RESET}"
+        return 1
+    fi
+    # Links that carry the URL as a query value store it percent-encoded
+    # ( redirect_to=https%3A%2F%2Fexample.com%2Fmy-account%2F, as login and account
+    # links do ); the passes above cannot match those either.
+    local url_old_encoded url_new_encoded
+    url_old_encoded=$(restore_percent_encode "$RESTORE_URL_OLD") && url_new_encoded=$(restore_percent_encode "$RESTORE_URL_NEW") || return 1
+    if ! run_wp_cli_without_site_code search-replace "$url_old_encoded" "$url_new_encoded" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root; then
+        echo -e "${RED}URL rewrite of percent-encoded references failed. The restored copy may still reference ${RESTORE_URL_OLD}; fix it before using the site.${RESET}"
         return 1
     fi
     # search-replace writes SQL directly. A restored object-cache drop-in can still

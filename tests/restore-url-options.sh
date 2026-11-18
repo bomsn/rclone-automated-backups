@@ -70,6 +70,7 @@ SEARCH_REPLACE_REACHES='siteurl home' maybe_wp_search_replace > "$work/output"
 rewritten
 grep -q '^search-replace https://live.example https://copy.example' "$work/calls"
 grep -Fq 'search-replace https:\/\/live.example https:\/\/copy.example' "$work/calls"
+grep -Fq 'search-replace https%3A%2F%2Flive.example https%3A%2F%2Fcopy.example' "$work/calls"
 ! grep -q '^option update' "$work/calls" || { echo 'Updated an option search-replace had already changed' >&2; exit 1; }
 grep -q '^cache flush' "$work/calls" && test -e "$dropin"
 
@@ -113,4 +114,4 @@ grep -q 'Could not read the restored site' "$work/output"
 ! grep -q 'no rewrite needed' "$work/output" || { echo 'Reported no rewrite needed for an unreadable URL' >&2; exit 1; }
 test "$(cat "$work/db/siteurl")" = https://live.example
 
-echo 'PASS: restore URL rewrite ignores a stale object cache and the restored site code, covers JSON-escaped URLs, updates only options that still differ, never flushes a shared cache and fails when the URL cannot be read'
+echo 'PASS: restore URL rewrite ignores a stale object cache and the restored site code, covers JSON-escaped and percent-encoded URLs, updates only options that still differ, never flushes a shared cache and fails when the URL cannot be read'
