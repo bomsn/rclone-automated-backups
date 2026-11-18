@@ -20,6 +20,10 @@ dropin="$work/target/wp-content/object-cache.php"
 # WordPress does. wp-config.php settings are files in $work/config.
 run_wp_cli() {
     printf '%s\n' "$*" >> "$work/calls"
+    # A restored must-use plugin that refuses to run here ( a staging guard ), unless
+    # must-use plugins are not loaded; or a URL that can't be read at all.
+    if [ -n "${MU_GUARD:-}" ] && [[ "$*" != *"define( 'WPMU_PLUGIN_DIR'"* ]]; then echo 'Staging safeguards are not configured.' >&2; return 1; fi
+    if [ -n "${URL_UNREADABLE:-}" ] && [ "$1 $2" = "option get" ]; then return 1; fi
     case "$1 $2" in
         "config get")
             [ -f "$work/config/$3" ] || return 1
@@ -94,4 +98,19 @@ for settings in '' 'WP_REDIS_PREFIX=copy:' "WP_REDIS_SCHEME=unix WP_REDIS_PATH=$
     test ! -e "$dropin" && test -e "$dropin.disabled-by-restore"
     grep -q 'disabled-by-restore' "$work/output"
 done
-echo 'PASS: restore URL rewrite ignores a stale object cache, covers JSON-escaped URLs, updates only options that still differ and never flushes a shared cache'
+# 5. A restored must-use plugin that refuses to run on another site ( a staging guard )
+#    does not block the rewrite: WordPress runs without the site's own code.
+start WP_REDIS_PREFIX=copy: WP_REDIS_SELECTIVE_FLUSH=1
+MU_GUARD=1 SEARCH_REPLACE_REACHES='siteurl home' maybe_wp_search_replace > /dev/null
+rewritten
+
+# 6. A URL that can't be read stops the restore with a clear message, never "no rewrite needed".
+start WP_REDIS_PREFIX=copy: WP_REDIS_SELECTIVE_FLUSH=1
+if URL_UNREADABLE=1 SEARCH_REPLACE_REACHES='siteurl home' maybe_wp_search_replace > "$work/output"; then
+    echo 'An unreadable URL was reported as nothing to rewrite' >&2; exit 1
+fi
+grep -q 'Could not read the restored site' "$work/output"
+! grep -q 'no rewrite needed' "$work/output" || { echo 'Reported no rewrite needed for an unreadable URL' >&2; exit 1; }
+test "$(cat "$work/db/siteurl")" = https://live.example
+
+echo 'PASS: restore URL rewrite ignores a stale object cache and the restored site code, covers JSON-escaped URLs, updates only options that still differ, never flushes a shared cache and fails when the URL cannot be read'

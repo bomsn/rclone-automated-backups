@@ -227,7 +227,7 @@ select_restore_destination() {
         # constant in wp-config.php, then the target directory name if it looks
         # like a domain. Any of these can be empty; that just means no default.
         local default_url=""
-        local u=$(run_wp_cli option get siteurl --path="$effective_path" --allow-root --skip-plugins --skip-themes 2>/dev/null)
+        local u=$(run_wp_cli_without_site_code option get siteurl --path="$effective_path" --allow-root 2>/dev/null)
         looks_like_http_url "$u" && default_url="$u"
         if [ -z "$default_url" ]; then
             u=$(wpconfig_constant_url "$effective_path")
@@ -240,7 +240,7 @@ select_restore_destination() {
 
         # Read the source URL too, so we can refuse a target URL that would point
         # the restored copy back at the live domain. Best-effort ( may be empty ).
-        local origin_url=$(run_wp_cli option get siteurl --path="$origin_path" --allow-root --skip-plugins --skip-themes 2>/dev/null)
+        local origin_url=$(run_wp_cli_without_site_code option get siteurl --path="$origin_path" --allow-root 2>/dev/null)
         looks_like_http_url "$origin_url" || origin_url=""
 
         # Always confirm the URL, pre-filled with the default: Enter accepts it.
@@ -518,7 +518,7 @@ restore_prepare_object_cache() {
 
 restore_flush_object_cache() {
     [ "$RESTORE_OBJECT_CACHE" = private ] || return 0
-    run_wp_cli cache flush --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes >/dev/null 2>&1 || true
+    run_wp_cli_without_site_code cache flush --path="$RESTORE_TARGET_PATH" --allow-root >/dev/null 2>&1 || true
 }
 
 # After the import, rewrite the WordPress URL from the source's ( which the
@@ -541,19 +541,24 @@ maybe_wp_search_replace() {
     # search for. A restored object-cache drop-in can still answer with the
     # destination's earlier URL, which once made a restore skip the rewrite and leave
     # the copy configured as the live site, so it is flushed ( a private cache ) or
-    # set aside ( any other ) before reading. Tolerate a non-zero / empty read under
-    # set -e, and only trust a real URL ( never a wp-cli error blob ).
+    # set aside ( any other ) before reading. Only a real URL is trusted ( never a
+    # wp-cli error blob ), and a URL that can't be read stops the restore: treating it
+    # as "nothing to rewrite" once left a copy pointing at its source while the
+    # restore reported success.
     restore_prepare_object_cache || { echo -e "${RED}Could not set aside the restored object-cache drop-in.${RESET}"; return 1; }
     restore_flush_object_cache
-    RESTORE_URL_OLD=$(run_wp_cli option get siteurl --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes 2>/dev/null) || true
-    looks_like_http_url "$RESTORE_URL_OLD" || RESTORE_URL_OLD=""
 
     if [ -z "$RESTORE_URL_NEW" ]; then
         echo -e "${YELLOW}No target URL was captured; skipping URL rewrite.${RESET}"
         return 0
     fi
-    if [ -z "$RESTORE_URL_OLD" ] || [ "$RESTORE_URL_OLD" == "$RESTORE_URL_NEW" ]; then
-        echo -e "${YELLOW}Imported site URL is empty or already matches the target URL ( ${RESTORE_URL_NEW} ); no rewrite needed.${RESET}"
+    RESTORE_URL_OLD=$(run_wp_cli_without_site_code option get siteurl --path="$RESTORE_TARGET_PATH" --allow-root 2>/dev/null) || RESTORE_URL_OLD=""
+    if ! looks_like_http_url "$RESTORE_URL_OLD"; then
+        echo -e "${RED}Could not read the restored site's URL, so it was not rewritten to ${RESTORE_URL_NEW}. The copy may still point at its source; fix siteurl and home before using it.${RESET}"
+        return 1
+    fi
+    if [ "$RESTORE_URL_OLD" == "$RESTORE_URL_NEW" ]; then
+        echo -e "${YELLOW}The imported site URL already matches the target URL ( ${RESTORE_URL_NEW} ); no rewrite needed.${RESET}"
         return 0
     fi
 
@@ -561,13 +566,13 @@ maybe_wp_search_replace() {
     echo -e "${YELLOW}Rewriting site URL ${RESTORE_URL_OLD} -> ${RESTORE_URL_NEW} ...${RESET}"
     # A failed rewrite would leave the restored copy pointing at the live domain,
     # so surface it loudly rather than letting set -e tear the whole tool down.
-    if ! run_wp_cli search-replace "$RESTORE_URL_OLD" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes; then
+    if ! run_wp_cli_without_site_code search-replace "$RESTORE_URL_OLD" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root; then
         echo -e "${RED}URL rewrite failed. The restored copy may still reference ${RESTORE_URL_OLD}; fix it before using the site.${RESET}"
         return 1
     fi
     # JSON stores the URL with escaped slashes ( https:\/\/example.com ), as Elementor
     # page data and SEO image metadata do; the plain pass above cannot match those.
-    if ! run_wp_cli search-replace "${RESTORE_URL_OLD//\//\\/}" "${RESTORE_URL_NEW//\//\\/}" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes; then
+    if ! run_wp_cli_without_site_code search-replace "${RESTORE_URL_OLD//\//\\/}" "${RESTORE_URL_NEW//\//\\/}" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root; then
         echo -e "${RED}URL rewrite of JSON-escaped references failed. The restored copy may still reference ${RESTORE_URL_OLD}; fix it before using the site.${RESET}"
         return 1
     fi
@@ -579,9 +584,9 @@ maybe_wp_search_replace() {
     # suspenders in case search-replace skipped a serialized edge case.
     local url_option url_current
     for url_option in siteurl home; do
-        url_current=$(run_wp_cli option get "$url_option" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes 2>/dev/null) || url_current=""
+        url_current=$(run_wp_cli_without_site_code option get "$url_option" --path="$RESTORE_TARGET_PATH" --allow-root 2>/dev/null) || url_current=""
         if [ "$url_current" != "$RESTORE_URL_NEW" ]; then
-            run_wp_cli option update "$url_option" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root --skip-plugins --skip-themes || return 1
+            run_wp_cli_without_site_code option update "$url_option" "$RESTORE_URL_NEW" --path="$RESTORE_TARGET_PATH" --allow-root || return 1
         fi
     done
 
@@ -590,7 +595,7 @@ maybe_wp_search_replace() {
     # or upload paths ). Harmless when the paths match ( skipped ) or absent.
     if [ -n "$RESTORE_SOURCE_PATH" ] && [ "$RESTORE_SOURCE_PATH" != "$RESTORE_TARGET_PATH" ]; then
         echo -e "${YELLOW}Rewriting stored paths ${RESTORE_SOURCE_PATH} -> ${RESTORE_TARGET_PATH} ...${RESET}"
-        run_wp_cli search-replace "$RESTORE_SOURCE_PATH" "$RESTORE_TARGET_PATH" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root --skip-plugins --skip-themes || return 1
+        run_wp_cli_without_site_code search-replace "$RESTORE_SOURCE_PATH" "$RESTORE_TARGET_PATH" --path="$RESTORE_TARGET_PATH" --all-tables-with-prefix --skip-columns=guid --report-changed-only --allow-root || return 1
     fi
 
     restore_flush_object_cache

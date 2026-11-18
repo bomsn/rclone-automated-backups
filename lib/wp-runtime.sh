@@ -37,6 +37,15 @@ run_wp_cli_as() {
     )
 }
 
+# WP-CLI without the site's own code: no plugins, no theme and no must-use plugins (WP-CLI's
+# --skip-plugins leaves must-use plugins loading). A restore reads and rewrites the imported data
+# this way, so code that came with the backup, such as a staging guard that refuses to run on any
+# other site, can neither block nor alter the rewrite. WordPress reads must-use plugins from
+# WPMU_PLUGIN_DIR only when it is a directory, and defines it only when it is not yet defined.
+run_wp_cli_without_site_code() {
+    run_wp_cli "$@" --skip-plugins --skip-themes "--exec=define( 'WPMU_PLUGIN_DIR', '/nonexistent/rclone-automated-backups-no-site-code' );"
+}
+
 run_wp_cli() {
     local site_path uid wp_user
     site_path=$(wp_runtime_path "$@") || { echo 'An explicit WordPress --path is required.' >&2; return 1; }
